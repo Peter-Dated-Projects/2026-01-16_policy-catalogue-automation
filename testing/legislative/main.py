@@ -7,6 +7,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, asdict
@@ -56,11 +57,55 @@ class Bill:
         bill_id: str,
         title: str,
         history: Optional[List[BillState]] = None,
+        bill_type: Optional[str] = None,
     ):
         self.session = session
         self.bill_id = bill_id
         self.title = title
         self.history: List[BillState] = history or []
+        # Auto-classify if not provided
+        self.bill_type = bill_type or self.classify_bill_type(bill_id, title)
+
+    @staticmethod
+    def classify_bill_type(bill_id: str, title: str) -> str:
+        """
+        Classify bill type based on identifier and title.
+
+        Returns one of:
+        - "Government Bill (House)" - C-bills numbered < 201
+        - "Private Member's Bill" - C-bills numbered > 200
+        - "Senate Bill" - S-bills
+        - "Amending Bill" - Title contains "Act to amend"
+        - "New Act" - Title contains "Act respecting"
+        """
+        # Extract bill number from identifier (e.g., "C-11" -> 11, "S-5" -> 5)
+        match = re.match(r"([CS])-?(\d+)", bill_id, re.IGNORECASE)
+
+        if not match:
+            return "Unknown"
+
+        bill_prefix = match.group(1).upper()
+        bill_number = int(match.group(2))
+
+        # Classification by identifier
+        if bill_prefix == "C":
+            if bill_number < 201:
+                bill_category = "Government Bill (House)"
+            else:
+                bill_category = "Private Member's Bill"
+        elif bill_prefix == "S":
+            bill_category = "Senate Bill"
+        else:
+            bill_category = "Unknown"
+
+        # Add amendment/new act classification
+        title_lower = title.lower()
+        if "act to amend" in title_lower:
+            bill_category += " - Amending"
+        elif "act respecting" in title_lower:
+            bill_category += " - New Act"
+
+        return bill_category
 
     @property
     def current_state(self) -> Optional[BillState]:
@@ -117,6 +162,7 @@ class Bill:
             "session": self.session,
             "bill_id": self.bill_id,
             "title": self.title,
+            "bill_type": self.bill_type,
             "history": [state.to_dict() for state in self.history],
         }
 
@@ -129,11 +175,12 @@ class Bill:
             bill_id=data["bill_id"],
             title=data["title"],
             history=history,
+            bill_type=data.get("bill_type"),  # Backward compatible
         )
 
 
 class BillTracker:
-    """Main daemon that manages bill tracking and persistence."""
+    """Tracks bills and their status changes over time."""
 
     def __init__(self, fetch_historical: bool = True):
         self.bills: Dict[str, Bill] = {}
@@ -384,7 +431,7 @@ class BillTracker:
             self.bills[unique_key] = bill
             if not suppress_new_log:
                 logger.info(
-                    f"📝 New bill tracked: {bill_id} - {bill_data['title'][:50]}"
+                    f"📝 New bill tracked: {bill_id} ({bill.bill_type}) - {bill_data['title'][:50]}"
                 )
         else:
             bill = self.bills[unique_key]
@@ -397,18 +444,18 @@ class BillTracker:
             text_url=bill_data["text_url"],
         )
 
-    def run_daemon(self) -> None:
+    def run_daemon(self, time_delay_seconds: float = POLL_INTERVAL_HOURS) -> None:
         """Main daemon loop - polls indefinitely."""
         logger.info("=" * 60)
         logger.info("Canadian Legislative Bill Tracker - STARTED")
-        logger.info(f"Poll interval: {POLL_INTERVAL_HOURS} hours")
+        logger.info(f"Poll interval: {round(time_delay_seconds / 3600, 2)} hours")
         logger.info("=" * 60)
 
         while True:
             try:
                 self.fetch_and_process_bills()
 
-                sleep_seconds = POLL_INTERVAL_HOURS * 3600
+                sleep_seconds = time_delay_seconds
                 next_poll = datetime.now().replace(microsecond=0)
                 next_poll = next_poll.timestamp() + sleep_seconds
                 next_poll_str = datetime.fromtimestamp(next_poll).strftime(
@@ -467,7 +514,8 @@ Examples:
         logger.info("Force historical fetch requested...")
         tracker._fetch_historical_bills()
 
-    tracker.run_daemon()
+    # tracker.run_daemon(time_delay_seconds=POLL_INTERVAL_HOURS * 3600)
+    tracker.run_daemon(time_delay_seconds=30)
 
 
 if __name__ == "__main__":
