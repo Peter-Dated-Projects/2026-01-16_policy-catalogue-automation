@@ -1,123 +1,474 @@
-# legislative law
+"""
+Canadian Legislative Bill Tracking System
+A persistent daemon that monitors bill status changes via the LEGISinfo API.
+"""
 
+import argparse
+import json
+import logging
+import os
+import time
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, asdict
+from datetime import datetime
+from pathlib import Path
+from typing import List, Dict, Optional
 
 import requests
-import xml.etree.ElementTree as ET
-from dataclasses import dataclass
-from datetime import datetime
-from typing import List, Optional
+
+# Configuration
+POLL_INTERVAL_HOURS = 4
+LEGIS_URL = "https://www.parl.ca/legisinfo/en/bills/xml"
+# Historical sessions to track (going back to 35th Parliament, 1994)
+# Format: Parliament-Session (e.g., "44-1" = 44th Parliament, 1st Session)
+HISTORICAL_PARLIAMENTS = list(range(35, 45))  # Parliaments 35 through 44
+STORAGE_DIR = Path("legislation")
+DB_FILE = STORAGE_DIR / "bills_db.json"
+
+# Logging setup
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class BillState:
-    bill_id: str  # e.g., "C-11"
-    session: str  # e.g., "44-1"
-    title: str
-    status_id: (
-        int  # LEGISinfo uses distinct IDs for statuses (e.g., 100 = First Reading)
-    )
-    status_text: str  # "Second Reading"
-    chamber: str  # "House of Commons" or "Senate"
-    last_updated: datetime
-    xml_url: str  # URL to detailed XML
+    """Immutable snapshot of a bill's status at a specific point in time."""
+
+    status_code: str
+    status_text: str
+    timestamp: str  # ISO format datetime
+    chamber: str
+    text_url: str
+
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for JSON serialization."""
+        return asdict(self)
 
 
 class Bill:
-    def __init__(self, session: str, bill_id: str, title: str):
-        self.session = session  # e.g., "44-1"
-        self.bill_id = bill_id  # e.g., "C-11"
+    """Represents a single piece of legislation with its complete history."""
+
+    def __init__(
+        self,
+        session: str,
+        bill_id: str,
+        title: str,
+        history: Optional[List[BillState]] = None,
+    ):
+        self.session = session
+        self.bill_id = bill_id
         self.title = title
-
-        # The Ledger: Stores every state transition in order
-        self._history: List[BillState] = []
-
-        # Metadata
-        self.sponsor: Optional[str] = None
-        self.last_scanned: datetime = datetime.now()
+        self.history: List[BillState] = history or []
 
     @property
     def current_state(self) -> Optional[BillState]:
-        """Returns the most recent state or None if new."""
-        return self._history[-1] if self._history else None
+        """Returns the most recent state, or None if no history exists."""
+        return self.history[-1] if self.history else None
+
+    @property
+    def unique_key(self) -> str:
+        """Unique identifier for this bill."""
+        return f"{self.session}-{self.bill_id}"
 
     def update(
-        self,
-        new_status_code: str,
-        new_status_text: str,
-        text_url: str,
-        event_date: datetime,
-        chamber: str = "House",
-    ):
+        self, status_code: str, status_text: str, chamber: str, text_url: str
+    ) -> bool:
         """
-        The Core Logic: Only updates if the state has arguably changed.
+        Compare new data against current state. If different, append new BillState.
+
+        Returns:
+            True if a change was detected and recorded, False otherwise.
         """
-        self.last_scanned = datetime.now()
-
-        # 1. Check if this is actually a new state
-        if self.current_state and self.current_state.status_code == new_status_code:
-            # OPTIONAL: Check if text changed even if status didn't (Silent Amendment)
-            # This is where you'd compare text_hashes if you implemented that.
-            return False
-
-        # 2. Create the new Snapshot
         new_state = BillState(
-            status_code=new_status_code,
-            status_text=new_status_text,
-            timestamp=event_date,
+            status_code=status_code,
+            status_text=status_text,
+            timestamp=datetime.now().isoformat(),
             chamber=chamber,
             text_url=text_url,
         )
 
-        # 3. Append to Ledger
-        self._history.append(new_state)
-        print(f"[{self.bill_id}] Transitioned to: {new_status_text}")
-        return True
+        # Check if state has changed
+        if self.current_state is None:
+            # First time seeing this bill
+            self.history.append(new_state)
+            return True
 
-    def get_time_in_stage(self) -> str:
-        """Calculates how long the bill has been stagnating in current state."""
-        if not self.current_state:
-            return "N/A"
-        delta = datetime.now() - self.current_state.timestamp
-        return f"{delta.days} days"
+        # Compare all fields except timestamp
+        if (
+            self.current_state.status_code != new_state.status_code
+            or self.current_state.status_text != new_state.status_text
+            or self.current_state.chamber != new_state.chamber
+        ):
 
-    def to_dict(self):
-        """Serialization for your Database/JSON file."""
+            old_status = self.current_state.status_text
+            self.history.append(new_state)
+            logger.info(
+                f"⚠️  ALERT: Bill {self.bill_id} moved from '{old_status}' -> '{status_text}'"
+            )
+            return True
+
+        return False
+
+    def to_dict(self) -> Dict:
+        """Serialize bill and its full history for JSON storage."""
         return {
-            "id": f"{self.session}-{self.bill_id}",
+            "session": self.session,
+            "bill_id": self.bill_id,
             "title": self.title,
-            "history": [asdict(state) for state in self._history],
+            "history": [state.to_dict() for state in self.history],
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict) -> "Bill":
+        """Deserialize bill from JSON data."""
+        history = [BillState(**state_data) for state_data in data.get("history", [])]
+        return cls(
+            session=data["session"],
+            bill_id=data["bill_id"],
+            title=data["title"],
+            history=history,
+        )
 
-LEGIS_URL = "https://www.parl.ca/legisinfo/en/bills/xml"
 
+class BillTracker:
+    """Main daemon that manages bill tracking and persistence."""
 
-def fetch_current_bills():
-    """Fetches and parses the master bill list."""
-    response = requests.get(LEGIS_URL)
-    response.raise_for_status()
+    def __init__(self, fetch_historical: bool = True):
+        self.bills: Dict[str, Bill] = {}
+        self.fetch_historical = fetch_historical
+        self._ensure_storage_exists()
+        self._load_database()
 
-    root = ET.fromstring(response.content)
-    current_state = {}
+    def _ensure_storage_exists(self) -> None:
+        """Create the legislation folder if it doesn't exist."""
+        STORAGE_DIR.mkdir(exist_ok=True)
+        logger.info(f"Storage directory verified: {STORAGE_DIR.absolute()}")
 
-    # XML Namespace handling (LEGISinfo usually has a namespace)
-    # For simplicity here, we assume direct tag access or strip namespaces
-    for bill in root.findall(".//Bill"):
-        bill_id = bill.find("NumberCode").text
-        session = bill.find("Session").text
+    def _load_database(self) -> None:
+        """Load existing bills and their history from disk."""
+        if not DB_FILE.exists():
+            logger.info("No existing database found. Starting fresh.")
+            if self.fetch_historical:
+                logger.info("Will perform initial historical bill fetch...")
+                self._fetch_historical_bills()
+            return
+
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            for bill_data in data.get("bills", []):
+                bill = Bill.from_dict(bill_data)
+                self.bills[bill.unique_key] = bill
+
+            bills_loaded = len(self.bills)
+            logger.info(f"Loaded {bills_loaded} bills from database.")
+
+            # If database exists but is empty/very small, offer to fetch historical
+            if bills_loaded < 10 and self.fetch_historical:
+                logger.info(
+                    f"Database has only {bills_loaded} bills. "
+                    "Fetching historical bills to populate database..."
+                )
+                self._fetch_historical_bills()
+        except Exception as e:
+            logger.error(f"Failed to load database: {e}")
+
+    def _save_database(self) -> None:
+        """Save all bills and their history to disk."""
+        try:
+            data = {
+                "last_updated": datetime.now().isoformat(),
+                "bills": [bill.to_dict() for bill in self.bills.values()],
+            }
+
+            with open(DB_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            logger.info(f"Database saved with {len(self.bills)} bills.")
+        except Exception as e:
+            logger.error(f"Failed to save database: {e}")
+
+    def _fetch_historical_bills(self) -> None:
+        """Fetch all bills from historical parliamentary sessions."""
+        logger.info("=" * 60)
+        logger.info("HISTORICAL BILL FETCH - This may take several minutes...")
+        logger.info("=" * 60)
+
+        total_fetched = 0
+
+        for parliament_num in HISTORICAL_PARLIAMENTS:
+            # Most parliaments have 1-2 sessions, some have more
+            for session_num in range(1, 5):  # Try up to 4 sessions per parliament
+                session_id = f"{parliament_num}-{session_num}"
+
+                try:
+                    # Build session-specific URL
+                    session_url = f"https://www.parl.ca/legisinfo/en/bills/xml?parlsession={parliament_num}-{session_num}"
+
+                    logger.info(f"Fetching Parliament {session_id}...")
+                    response = requests.get(session_url, timeout=30)
+
+                    # If session doesn't exist, we'll get 404 or empty response
+                    if response.status_code == 404:
+                        break  # No more sessions for this parliament
+
+                    response.raise_for_status()
+
+                    # Try to parse - if empty or invalid, move on
+                    try:
+                        root = ET.fromstring(response.content)
+                    except ET.ParseError:
+                        logger.warning(f"Could not parse XML for session {session_id}")
+                        break
+
+                    ns = (
+                        {"ns": root.tag.split("}")[0].strip("{")}
+                        if "}" in root.tag
+                        else {}
+                    )
+
+                    session_count = 0
+                    for bill_elem in root.iter():
+                        if "Bill" in bill_elem.tag:
+                            try:
+                                bill_data = self._parse_bill_element(bill_elem, ns)
+                                if bill_data:
+                                    self._process_bill(bill_data, suppress_new_log=True)
+                                    session_count += 1
+                            except Exception as e:
+                                logger.debug(
+                                    f"Failed to parse bill in {session_id}: {e}"
+                                )
+
+                    if session_count == 0:
+                        break  # Empty session, likely end of this parliament
+
+                    total_fetched += session_count
+                    logger.info(f"  → Added {session_count} bills from {session_id}")
+
+                    # Be respectful to the API
+                    time.sleep(1)
+
+                except requests.RequestException:
+                    # Session doesn't exist or network issue
+                    break
+                except Exception as e:
+                    logger.warning(f"Error fetching session {session_id}: {e}")
+                    break
+
+        logger.info("=" * 60)
+        logger.info(f"Historical fetch complete: {total_fetched} bills added")
+        logger.info("=" * 60)
+
+        # Save the historical data
+        self._save_database()
+
+    def fetch_and_process_bills(self) -> None:
+        """Fetch bills from LEGISinfo API and process changes."""
+        try:
+            logger.info("Fetching current bills from LEGISinfo API...")
+            response = requests.get(LEGIS_URL, timeout=30)
+            response.raise_for_status()
+
+            root = ET.fromstring(response.content)
+
+            # Handle XML namespaces if present
+            ns = {"ns": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
+
+            bills_processed = 0
+            changes_detected = 0
+
+            # Parse bills from XML
+            for bill_elem in root.iter():
+                if "Bill" in bill_elem.tag:
+                    try:
+                        bill_data = self._parse_bill_element(bill_elem, ns)
+                        if bill_data:
+                            changed = self._process_bill(bill_data)
+                            bills_processed += 1
+                            if changed:
+                                changes_detected += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to parse bill element: {e}")
+
+            logger.info(
+                f"Processed {bills_processed} bills. "
+                f"Changes detected: {changes_detected}"
+            )
+
+            # Save after processing
+            self._save_database()
+
+        except requests.RequestException as e:
+            logger.error(f"Network error while fetching bills: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error during fetch: {e}")
+
+    def _parse_bill_element(self, elem: ET.Element, ns: Dict) -> Optional[Dict]:
+        """Extract bill data from XML element."""
+
+        def safe_find(path: str) -> Optional[str]:
+            """Safely find element text, handling namespaces and missing elements."""
+            try:
+                found = elem.find(path)
+                if found is not None and found.text:
+                    return found.text.strip()
+            except:
+                pass
+            return None
+
+        # Extract data from the actual XML structure
+        bill_number = safe_find("BillNumberFormatted")  # e.g., "C-11" or "S-1"
+        session_code = safe_find("ParlSessionCode")  # e.g., "44-1"
+
+        # Also try alternative field names
+        if not bill_number:
+            bill_number = safe_find("BillNumber") or safe_find("Number")
+        if not session_code:
+            session_code = safe_find("Session") or safe_find("Parliament")
+
+        # Get title - try long title first
+        title = (
+            safe_find("LongTitleEn")
+            or safe_find("ShortTitleEn")
+            or safe_find("Title")
+            or "Unknown Title"
+        )
+
+        # Status information
+        status_text = (
+            safe_find("CurrentStatusEn")
+            or safe_find("LatestCompletedMajorStageEn")
+            or safe_find("Status")
+            or "Unknown Status"
+        )
+
+        status_code = safe_find("CurrentStatusId") or "UNKNOWN"
+
+        # Chamber information
+        chamber_id = safe_find("OriginatingChamberId")
+        if chamber_id == "1":
+            chamber = "House of Commons"
+        elif chamber_id == "2":
+            chamber = "Senate"
+        else:
+            chamber = safe_find("Chamber") or "Unknown"
+
+        if not bill_number or not session_code:
+            return None
+
+        text_url = f"https://www.parl.ca/legisinfo/en/bill/{session_code}/{bill_number}"
+
+        return {
+            "bill_id": bill_number,
+            "session": session_code,
+            "title": title,
+            "status_code": status_code,
+            "status_text": status_text,
+            "chamber": chamber,
+            "text_url": text_url,
+        }
+
+    def _process_bill(self, bill_data: Dict, suppress_new_log: bool = False) -> bool:
+        """Process a bill, updating or creating as needed."""
+        session = bill_data["session"]
+        bill_id = bill_data["bill_id"]
         unique_key = f"{session}-{bill_id}"
 
-        current_state[unique_key] = {
-            "id": bill_id,
-            "session": session,
-            "status_id": int(bill.find("CurrentStatus/Id").text),
-            "status_text": bill.find("CurrentStatus/Name").text,
-            "updated": bill.find("LastUpdated").text,
-            "detail_url": f"https://www.parl.ca/legisinfo/en/bill/{session}/{bill_id}/xml",
-        }
+        # Get or create bill
+        if unique_key not in self.bills:
+            bill = Bill(session=session, bill_id=bill_id, title=bill_data["title"])
+            self.bills[unique_key] = bill
+            if not suppress_new_log:
+                logger.info(
+                    f"📝 New bill tracked: {bill_id} - {bill_data['title'][:50]}"
+                )
+        else:
+            bill = self.bills[unique_key]
 
-    return current_state
+        # Update and check for changes
+        return bill.update(
+            status_code=bill_data["status_code"],
+            status_text=bill_data["status_text"],
+            chamber=bill_data["chamber"],
+            text_url=bill_data["text_url"],
+        )
+
+    def run_daemon(self) -> None:
+        """Main daemon loop - polls indefinitely."""
+        logger.info("=" * 60)
+        logger.info("Canadian Legislative Bill Tracker - STARTED")
+        logger.info(f"Poll interval: {POLL_INTERVAL_HOURS} hours")
+        logger.info("=" * 60)
+
+        while True:
+            try:
+                self.fetch_and_process_bills()
+
+                sleep_seconds = POLL_INTERVAL_HOURS * 3600
+                next_poll = datetime.now().replace(microsecond=0)
+                next_poll = next_poll.timestamp() + sleep_seconds
+                next_poll_str = datetime.fromtimestamp(next_poll).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+
+                logger.info(f"Sleeping until next poll at {next_poll_str}")
+                time.sleep(sleep_seconds)
+
+            except KeyboardInterrupt:
+                logger.info("\n🛑 Daemon stopped by user.")
+                break
+            except Exception as e:
+                logger.error(f"Unexpected error in daemon loop: {e}")
+                logger.info("Retrying in 5 minutes...")
+                time.sleep(300)  # Wait 5 minutes before retry
+
+
+def main():
+    """Entry point for the bill tracking daemon."""
+    parser = argparse.ArgumentParser(
+        description="Canadian Legislative Bill Tracking System",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run daemon with historical fetch on first run
+  python main.py
+  
+  # Run daemon without historical fetch (faster startup)
+  python main.py --no-historical
+  
+  # Force fetch all historical bills (even if database exists)
+  python main.py --force-historical
+        """,
+    )
+    parser.add_argument(
+        "--no-historical",
+        action="store_true",
+        help="Skip automatic historical bill fetch on first run",
+    )
+    parser.add_argument(
+        "--force-historical",
+        action="store_true",
+        help="Force fetch all historical bills, even if database exists",
+    )
+
+    args = parser.parse_args()
+
+    # Determine if we should fetch historical bills
+    fetch_historical = not args.no_historical
+
+    tracker = BillTracker(fetch_historical=fetch_historical)
+
+    # If force-historical is set, fetch regardless of database state
+    if args.force_historical:
+        logger.info("Force historical fetch requested...")
+        tracker._fetch_historical_bills()
+
+    tracker.run_daemon()
 
 
 if __name__ == "__main__":
-    print("This is the legislative law module.")
+    main()
