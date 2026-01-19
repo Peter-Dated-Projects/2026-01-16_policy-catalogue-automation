@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 class BillStage(Enum):
     """Legislative stages for Canadian bills."""
+
     FIRST_READING = "First Reading"
     SECOND_READING = "Second Reading"
     COMMITTEE = "Committee"
@@ -156,13 +157,13 @@ class Bill:
             return None
         try:
             # Parse ISO format datetime (may include timezone)
-            if 'T' in self.last_activity_date:
+            if "T" in self.last_activity_date:
                 # Remove timezone info for parsing
-                date_part = self.last_activity_date.split('T')[0]
+                date_part = self.last_activity_date.split("T")[0]
                 last_date = datetime.fromisoformat(date_part)
             else:
                 last_date = datetime.fromisoformat(self.last_activity_date)
-            
+
             days = (datetime.now() - last_date).days
             return days
         except:
@@ -174,32 +175,29 @@ class Bill:
         return bool(self.royal_assent_date)
 
     def determine_stage_transition(
-        self,
-        status_text: str,
-        chamber: str,
-        new_publication_count: int = 0
+        self, status_text: str, chamber: str, new_publication_count: int = 0
     ) -> Tuple[BillStage, bool]:
         """
         Determine the legislative stage and whether text has changed.
-        
+
         Args:
             status_text: Current status from XML (e.g., "At second reading...")
             chamber: Current chamber ("House of Commons" or "Senate")
             new_publication_count: Number of publication entries in XML
-            
+
         Returns:
             Tuple of (BillStage, text_changed_flag)
         """
         text_changed = False
         status_lower = status_text.lower()
-        
+
         # Check if bill is new (empty history)
         if not self.history:
             return (BillStage.FIRST_READING, False)
-        
+
         # Get previous chamber
         previous_chamber = self.current_state.chamber if self.current_state else None
-        
+
         # Chamber switch detection (House -> Senate or Senate -> House)
         if previous_chamber and previous_chamber != chamber:
             if chamber == "Senate" or "senate" in chamber.lower():
@@ -208,19 +206,23 @@ class Bill:
             elif chamber == "House of Commons" or "house" in chamber.lower():
                 logger.info(f"📨 Bill {self.bill_id} moved to House")
                 return (BillStage.PASSED_HOUSE, False)
-        
+
         # Royal Assent (final stage)
         if "royal assent" in status_lower or self.royal_assent_date:
             return (BillStage.ROYAL_ASSENT, False)
-        
+
         # Defeated/withdrawn
-        if "defeated" in status_lower or "withdrawn" in status_lower or "not proceeded" in status_lower:
+        if (
+            "defeated" in status_lower
+            or "withdrawn" in status_lower
+            or "not proceeded" in status_lower
+        ):
             return (BillStage.DEFEATED, False)
-        
+
         # Third Reading
         if "third reading" in status_lower:
             return (BillStage.THIRD_READING, False)
-        
+
         # Report Stage (critical for amendment detection)
         if "report stage" in status_lower or "report" in status_lower:
             # Check if publication count increased (indicates amendment)
@@ -231,33 +233,38 @@ class Bill:
                     f"Publications {self.publication_count} → {new_publication_count}"
                 )
             return (BillStage.REPORT_STAGE, text_changed)
-        
+
         # Committee Stage
         if "committee" in status_lower:
             return (BillStage.COMMITTEE, False)
-        
+
         # Second Reading
         if "second reading" in status_lower:
             return (BillStage.SECOND_READING, False)
-        
+
         # First Reading (default for new bills or initial stages)
         if "first reading" in status_lower or "introduced" in status_lower:
             return (BillStage.FIRST_READING, False)
-        
+
         # Passed originating chamber
         if "passed" in status_lower and "house" in status_lower:
             return (BillStage.PASSED_HOUSE, False)
-        
+
         # If we can't determine, keep current stage
         try:
             current_stage_enum = BillStage[self.current_stage]
         except (KeyError, TypeError):
             current_stage_enum = BillStage.UNKNOWN
-        
+
         return (current_stage_enum, False)
 
     def update(
-        self, status_code: str, status_text: str, chamber: str, text_url: str, publication_count: int = 0
+        self,
+        status_code: str,
+        status_text: str,
+        chamber: str,
+        text_url: str,
+        publication_count: int = 0,
     ) -> bool:
         """
         Compare new data against current state. If different, append new BillState.
@@ -269,7 +276,7 @@ class Bill:
         new_stage, text_changed = self.determine_stage_transition(
             status_text, chamber, publication_count
         )
-        
+
         new_state = BillState(
             status_code=status_code,
             status_text=status_text,
@@ -296,24 +303,28 @@ class Bill:
             or self.current_state.stage != new_state.stage
             or text_changed
         )
-        
+
         if state_changed:
             old_status = self.current_state.status_text
             old_stage = self.current_state.stage or "Unknown"
-            
+
             # Update tracking fields
             self.current_stage = new_stage.name
             self.publication_count = publication_count
-            
+
             self.history.append(new_state)
-            
+
             # Enhanced logging
             if text_changed:
                 logger.info(
                     f"📝 AMENDMENT: Bill {self.bill_id} text changed at {new_stage.value}"
                 )
-            
-            stage_change = f" [{old_stage} → {new_stage.name}]" if old_stage != new_stage.name else ""
+
+            stage_change = (
+                f" [{old_stage} → {new_stage.name}]"
+                if old_stage != new_stage.name
+                else ""
+            )
             logger.info(
                 f"⚠️  ALERT: Bill {self.bill_id} moved from '{old_status}' → '{status_text}'{stage_change}"
             )
@@ -593,7 +604,7 @@ class BillTracker:
         sponsor_affiliation = safe_find("PoliticalAffiliationId")
         royal_assent_date = safe_find("ReceivedRoyalAssentDateTime")
         last_activity_date = safe_find("LatestActivityDateTime")
-        
+
         # Count publications (for amendment detection)
         publication_count = 0
         try:
@@ -602,7 +613,7 @@ class BillTracker:
                 publication_count += 1
         except:
             pass
-        
+
         # Check for royal recommendation (typically indicated by MinistryId or certain bill types)
         ministry_id = safe_find("MinistryId")
         bill_type_text = safe_find("BillTypeEn") or ""
@@ -642,7 +653,9 @@ class BillTracker:
                 sponsor_affiliation=bill_data.get("sponsor_affiliation"),
                 royal_assent_date=bill_data.get("royal_assent_date"),
                 last_activity_date=bill_data.get("last_activity_date"),
-                has_royal_recommendation=bill_data.get("has_royal_recommendation", False),
+                has_royal_recommendation=bill_data.get(
+                    "has_royal_recommendation", False
+                ),
             )
             self.bills[unique_key] = bill
             if not suppress_new_log:
@@ -654,10 +667,18 @@ class BillTracker:
             bill = self.bills[unique_key]
             # Update metadata that might change
             bill.sponsor = bill_data.get("sponsor") or bill.sponsor
-            bill.sponsor_affiliation = bill_data.get("sponsor_affiliation") or bill.sponsor_affiliation
-            bill.royal_assent_date = bill_data.get("royal_assent_date") or bill.royal_assent_date
-            bill.last_activity_date = bill_data.get("last_activity_date") or bill.last_activity_date
-            bill.has_royal_recommendation = bill_data.get("has_royal_recommendation", bill.has_royal_recommendation)
+            bill.sponsor_affiliation = (
+                bill_data.get("sponsor_affiliation") or bill.sponsor_affiliation
+            )
+            bill.royal_assent_date = (
+                bill_data.get("royal_assent_date") or bill.royal_assent_date
+            )
+            bill.last_activity_date = (
+                bill_data.get("last_activity_date") or bill.last_activity_date
+            )
+            bill.has_royal_recommendation = bill_data.get(
+                "has_royal_recommendation", bill.has_royal_recommendation
+            )
 
         # Update and check for changes
         return bill.update(
@@ -738,8 +759,8 @@ Examples:
         logger.info("Force historical fetch requested...")
         tracker._fetch_historical_bills()
 
-    # tracker.run_daemon(time_delay_seconds=POLL_INTERVAL_HOURS * 3600)
-    tracker.run_daemon(time_delay_seconds=30)
+    tracker.run_daemon(time_delay_seconds=POLL_INTERVAL_HOURS * 3600)
+    # tracker.run_daemon(time_delay_seconds=30)
 
 
 if __name__ == "__main__":
