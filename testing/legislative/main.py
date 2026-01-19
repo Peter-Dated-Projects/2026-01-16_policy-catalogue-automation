@@ -58,6 +58,11 @@ class Bill:
         title: str,
         history: Optional[List[BillState]] = None,
         bill_type: Optional[str] = None,
+        sponsor: Optional[str] = None,
+        sponsor_affiliation: Optional[str] = None,
+        royal_assent_date: Optional[str] = None,
+        last_activity_date: Optional[str] = None,
+        has_royal_recommendation: bool = False,
     ):
         self.session = session
         self.bill_id = bill_id
@@ -65,6 +70,11 @@ class Bill:
         self.history: List[BillState] = history or []
         # Auto-classify if not provided
         self.bill_type = bill_type or self.classify_bill_type(bill_id, title)
+        self.sponsor = sponsor
+        self.sponsor_affiliation = sponsor_affiliation
+        self.royal_assent_date = royal_assent_date
+        self.last_activity_date = last_activity_date
+        self.has_royal_recommendation = has_royal_recommendation
 
     @staticmethod
     def classify_bill_type(bill_id: str, title: str) -> str:
@@ -117,6 +127,30 @@ class Bill:
         """Unique identifier for this bill."""
         return f"{self.session}-{self.bill_id}"
 
+    @property
+    def days_since_last_activity(self) -> Optional[int]:
+        """Calculate days since last activity."""
+        if not self.last_activity_date:
+            return None
+        try:
+            # Parse ISO format datetime (may include timezone)
+            if 'T' in self.last_activity_date:
+                # Remove timezone info for parsing
+                date_part = self.last_activity_date.split('T')[0]
+                last_date = datetime.fromisoformat(date_part)
+            else:
+                last_date = datetime.fromisoformat(self.last_activity_date)
+            
+            days = (datetime.now() - last_date).days
+            return days
+        except:
+            return None
+
+    @property
+    def is_royal_assent_received(self) -> bool:
+        """Check if bill has received royal assent."""
+        return bool(self.royal_assent_date)
+
     def update(
         self, status_code: str, status_text: str, chamber: str, text_url: str
     ) -> bool:
@@ -163,6 +197,11 @@ class Bill:
             "bill_id": self.bill_id,
             "title": self.title,
             "bill_type": self.bill_type,
+            "sponsor": self.sponsor,
+            "sponsor_affiliation": self.sponsor_affiliation,
+            "royal_assent_date": self.royal_assent_date,
+            "last_activity_date": self.last_activity_date,
+            "has_royal_recommendation": self.has_royal_recommendation,
             "history": [state.to_dict() for state in self.history],
         }
 
@@ -176,6 +215,11 @@ class Bill:
             title=data["title"],
             history=history,
             bill_type=data.get("bill_type"),  # Backward compatible
+            sponsor=data.get("sponsor"),
+            sponsor_affiliation=data.get("sponsor_affiliation"),
+            royal_assent_date=data.get("royal_assent_date"),
+            last_activity_date=data.get("last_activity_date"),
+            has_royal_recommendation=data.get("has_royal_recommendation", False),
         )
 
 
@@ -409,6 +453,19 @@ class BillTracker:
 
         text_url = f"https://www.parl.ca/legisinfo/en/bill/{session_code}/{bill_number}"
 
+        # New tracking fields
+        sponsor = safe_find("SponsorEn")
+        sponsor_affiliation = safe_find("PoliticalAffiliationId")
+        royal_assent_date = safe_find("ReceivedRoyalAssentDateTime")
+        last_activity_date = safe_find("LatestActivityDateTime")
+        
+        # Check for royal recommendation (typically indicated by MinistryId or certain bill types)
+        ministry_id = safe_find("MinistryId")
+        bill_type_text = safe_find("BillTypeEn") or ""
+        has_royal_recommendation = (
+            ministry_id and ministry_id != "0"
+        ) or "Government Bill" in bill_type_text
+
         return {
             "bill_id": bill_number,
             "session": session_code,
@@ -417,6 +474,11 @@ class BillTracker:
             "status_text": status_text,
             "chamber": chamber,
             "text_url": text_url,
+            "sponsor": sponsor,
+            "sponsor_affiliation": sponsor_affiliation,
+            "royal_assent_date": royal_assent_date,
+            "last_activity_date": last_activity_date,
+            "has_royal_recommendation": has_royal_recommendation,
         }
 
     def _process_bill(self, bill_data: Dict, suppress_new_log: bool = False) -> bool:
@@ -427,14 +489,30 @@ class BillTracker:
 
         # Get or create bill
         if unique_key not in self.bills:
-            bill = Bill(session=session, bill_id=bill_id, title=bill_data["title"])
+            bill = Bill(
+                session=session,
+                bill_id=bill_id,
+                title=bill_data["title"],
+                sponsor=bill_data.get("sponsor"),
+                sponsor_affiliation=bill_data.get("sponsor_affiliation"),
+                royal_assent_date=bill_data.get("royal_assent_date"),
+                last_activity_date=bill_data.get("last_activity_date"),
+                has_royal_recommendation=bill_data.get("has_royal_recommendation", False),
+            )
             self.bills[unique_key] = bill
             if not suppress_new_log:
+                sponsor_info = f" | Sponsor: {bill.sponsor}" if bill.sponsor else ""
                 logger.info(
-                    f"📝 New bill tracked: {bill_id} ({bill.bill_type}) - {bill_data['title'][:50]}"
+                    f"📝 New bill tracked: {bill_id} ({bill.bill_type}){sponsor_info} - {bill_data['title'][:50]}"
                 )
         else:
             bill = self.bills[unique_key]
+            # Update metadata that might change
+            bill.sponsor = bill_data.get("sponsor") or bill.sponsor
+            bill.sponsor_affiliation = bill_data.get("sponsor_affiliation") or bill.sponsor_affiliation
+            bill.royal_assent_date = bill_data.get("royal_assent_date") or bill.royal_assent_date
+            bill.last_activity_date = bill_data.get("last_activity_date") or bill.last_activity_date
+            bill.has_royal_recommendation = bill_data.get("has_royal_recommendation", bill.has_royal_recommendation)
 
         # Update and check for changes
         return bill.update(
