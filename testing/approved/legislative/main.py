@@ -759,8 +759,8 @@ Examples:
         logger.info("Force historical fetch requested...")
         tracker._fetch_historical_bills()
 
-    # tracker.run_daemon(time_delay_seconds=POLL_INTERVAL_HOURS * 3600)
-    tracker.run_daemon(time_delay_seconds=30)
+    tracker.run_daemon(time_delay_seconds=POLL_INTERVAL_HOURS * 3600)
+    # tracker.run_daemon(time_delay_seconds=30)
 
 
 if __name__ == "__main__":
