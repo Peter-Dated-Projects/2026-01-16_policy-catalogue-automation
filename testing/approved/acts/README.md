@@ -101,8 +101,10 @@ testing/approved/acts/
 │   └── repo_manager.py
 ├── assets/
 │   └── justice_laws_xml/ # Git repository clone
-│       ├── Acts/         # ~600 XML files
-│       └── Regulations/  # ~2000+ XML files
+│       ├── eng/
+│       │   ├── acts/     # ~600 XML files
+│       │   └── regulations/ # ~2000+ XML files
+│       └── fra/          # French XML files
 ├── laws.db              # SQLite index
 ├── law_library.log      # Application logs
 └── main.py              # Entry point

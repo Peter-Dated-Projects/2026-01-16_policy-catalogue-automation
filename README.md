@@ -29,3 +29,8 @@ A Python system that monitors Canadian Parliament bills via the LEGISinfo API. T
 [View Documentation](testing/approved/regulation/README.md)
 
 A Python system that monitors Canadian Federal Regulations from the Canada Gazette RSS feeds. Tracks both proposed regulations (Part I) and enacted regulations (Part II), extracting structured metadata including regulation IDs, sponsor departments, enabling acts, and publication dates. Polls feeds every 24 hours and maintains a persistent JSON database of all regulations.
+
+### Canadian Law Library (Acts/Statutes Tracker)
+[View Documentation](testing/approved/acts/README.md)
+
+A comprehensive system for syncing and searching Canadian federal laws from the official Department of Justice repository (Justice Laws XML). Features automatic synchronization with the official GitHub repository, fast SQLite indexing for instant search, and a high-level Python API for law lookup. Runs a background daemon to keep the local law repository up-to-date every 4 hours.
