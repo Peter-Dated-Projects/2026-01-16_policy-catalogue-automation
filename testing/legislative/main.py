@@ -6,7 +6,6 @@ A persistent daemon that monitors bill status changes via the LEGISinfo API.
 import argparse
 import json
 import logging
-import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -21,13 +20,14 @@ import requests
 # Configuration
 POLL_INTERVAL_HOURS = 4
 LEGIS_URL = "https://www.parl.ca/legisinfo/en/bills/xml"
-# Current parliament to actively monitor (bills in older sessions are historical only)
-CURRENT_PARLIAMENT = 44  # Update this when a new parliament begins
+# Current parliament to actively monitor (auto-detected from API)
+# Will be set to the highest parliament number found in the bills
+CURRENT_PARLIAMENT = None  # Auto-detected on first fetch
 # Historical sessions to track (going back to 35th Parliament, 1994)
 # Format: Parliament-Session (e.g., "44-1" = 44th Parliament, 1st Session)
 HISTORICAL_PARLIAMENTS = list(range(35, 45))  # Parliaments 35 through 44
 STORAGE_DIR = Path("assets")
-DB_FILE = STORAGE_DIR / "bills_db.json"
+DB_FILE = STORAGE_DIR / "data.json"
 
 # Logging setup
 logging.basicConfig(
@@ -49,6 +49,15 @@ class BillStage(Enum):
     ROYAL_ASSENT = "Royal Assent"
     DEFEATED = "Defeated"
     UNKNOWN = "Unknown"
+
+
+class CIFStatus(Enum):
+    """Coming into Force status for bills that received Royal Assent."""
+
+    ACTIVE_ON_ASSENT = "Active on Royal Assent"  # Default: active immediately
+    FIXED_DATE = "Fixed Date"  # Specific date mentioned in CIF section
+    WAITING_FOR_ORDER = "Waiting for Order in Council"  # Needs regulation to activate
+    NOT_DETERMINED = "Not Yet Determined"  # Royal Assent received but CIF not analyzed
 
 
 @dataclass(frozen=True)
@@ -87,6 +96,9 @@ class Bill:
         publication_count: int = 0,
         is_active: bool = True,
         died_on_order_paper: bool = False,
+        chapter_citation: Optional[str] = None,
+        cif_status: Optional[str] = None,
+        cif_details: Optional[str] = None,
     ):
         self.session = session
         self.bill_id = bill_id
@@ -107,6 +119,12 @@ class Bill:
         self.died_on_order_paper = (
             died_on_order_paper  # True if bill died when session ended
         )
+        # Royal Assent / Statute tracking
+        self.chapter_citation = chapter_citation  # e.g., "S.C. 2023, c. 15"
+        self.cif_status = (
+            cif_status or CIFStatus.NOT_DETERMINED.name
+        )  # Coming into Force status
+        self.cif_details = cif_details  # Raw text from CIF section
 
     @staticmethod
     def classify_bill_type(bill_id: str, title: str) -> str:
@@ -160,25 +178,6 @@ class Bill:
         return f"{self.session}-{self.bill_id}"
 
     @property
-    def days_since_last_activity(self) -> Optional[int]:
-        """Calculate days since last activity."""
-        if not self.last_activity_date:
-            return None
-        try:
-            # Parse ISO format datetime (may include timezone)
-            if "T" in self.last_activity_date:
-                # Remove timezone info for parsing
-                date_part = self.last_activity_date.split("T")[0]
-                last_date = datetime.fromisoformat(date_part)
-            else:
-                last_date = datetime.fromisoformat(self.last_activity_date)
-
-            days = (datetime.now() - last_date).days
-            return days
-        except:
-            return None
-
-    @property
     def is_royal_assent_received(self) -> bool:
         """Check if bill has received royal assent."""
         return bool(self.royal_assent_date)
@@ -194,6 +193,8 @@ class Bill:
     @property
     def is_from_current_parliament(self) -> bool:
         """Check if bill is from the current parliament."""
+        if CURRENT_PARLIAMENT is None:
+            return True  # If not yet determined, treat all as current
         return self.parliament_number == CURRENT_PARLIAMENT
 
     def determine_stage_transition(
@@ -350,6 +351,19 @@ class Bill:
             logger.info(
                 f"⚠️  ALERT: Bill {self.bill_id} moved from '{old_status}' → '{status_text}'{stage_change}"
             )
+
+            # If bill just received Royal Assent, trigger statute processing
+            if (
+                new_stage == BillStage.ROYAL_ASSENT
+                and old_stage != BillStage.ROYAL_ASSENT.name
+            ):
+                logger.info(
+                    f"🎉 Bill {self.bill_id} received ROYAL ASSENT - now a Statute!"
+                )
+                # Note: Full text processing would happen here if we had access to bill text
+                # For now, we mark it for later processing
+                self.cif_status = CIFStatus.NOT_DETERMINED.name
+
             return True
 
         return False
@@ -370,6 +384,9 @@ class Bill:
             "publication_count": self.publication_count,
             "is_active": self.is_active,
             "died_on_order_paper": self.died_on_order_paper,
+            "chapter_citation": self.chapter_citation,
+            "cif_status": self.cif_status,
+            "cif_details": self.cif_details,
             "history": [state.to_dict() for state in self.history],
         }
 
@@ -394,7 +411,203 @@ class Bill:
                 "is_active", True
             ),  # Backward compatible - default to True
             died_on_order_paper=data.get("died_on_order_paper", False),
+            chapter_citation=data.get("chapter_citation"),
+            cif_status=data.get("cif_status"),
+            cif_details=data.get("cif_details"),
         )
+
+
+# =============================================================================
+# Royal Assent Processing Functions
+# =============================================================================
+
+
+def extract_chapter_citation(bill_text: str, metadata: Dict) -> Optional[str]:
+    """
+    Extract the chapter citation (permanent statute ID) from bill text or metadata.
+
+    Searches for patterns like:
+    - S.C. 2024, c. 15
+    - Statutes of Canada 2024 Chapter 15
+    - S.C. 2023, ch. 42
+
+    Args:
+        bill_text: Full text of the bill/statute
+        metadata: Bill metadata dictionary
+
+    Returns:
+        Chapter citation string or None if not found
+    """
+    # Pattern 1: S.C. YYYY, c. NN (most common)
+    pattern1 = r"S\.C\.\s*(\d{4}),\s*c(?:h)?\.?\s*(\d+)"
+
+    # Pattern 2: Statutes of Canada YYYY Chapter NN
+    pattern2 = r"Statutes\s+of\s+Canada\s+(\d{4})\s+Chapter\s+(\d+)"
+
+    # Pattern 3: Alternative formatting variations
+    pattern3 = (
+        r"(?:S\.C\.|Statutes of Canada)\s*(\d{4})[,\s]+(?:c\.|ch\.|Chapter)\s*(\d+)"
+    )
+
+    # Search in metadata first (more reliable)
+    metadata_text = str(metadata)
+    for pattern in [pattern1, pattern2, pattern3]:
+        match = re.search(pattern, metadata_text, re.IGNORECASE)
+        if match:
+            year = match.group(1)
+            chapter = match.group(2)
+            return f"S.C. {year}, c. {chapter}"
+
+    # Search in bill text (first 5000 chars where chapter info usually appears)
+    text_header = bill_text[:5000] if bill_text else ""
+    for pattern in [pattern1, pattern2, pattern3]:
+        match = re.search(pattern, text_header, re.IGNORECASE)
+        if match:
+            year = match.group(1)
+            chapter = match.group(2)
+            return f"S.C. {year}, c. {chapter}"
+
+    return None
+
+
+def analyze_coming_into_force(bill_text: str) -> Tuple[str, Optional[str]]:
+    """
+    Analyze the Coming into Force (CIF) section of a bill.
+
+    Canadian bills have three common CIF patterns:
+    1. Active on Royal Assent (immediate)
+    2. Fixed date (specific year/date mentioned)
+    3. Order in Council (requires future regulation)
+
+    Args:
+        bill_text: Full text of the bill/statute
+
+    Returns:
+        Tuple of (CIFStatus enum name, details text)
+    """
+    if not bill_text:
+        return (CIFStatus.NOT_DETERMINED.name, None)
+
+    # Scan last 2000 characters where CIF sections typically appear
+    cif_section = bill_text[-2000:]
+
+    # Look for Coming into Force header
+    cif_patterns = [
+        r"Coming into Force",
+        r"Coming into force",
+        r"Commencement",
+        r"Entry into Force",
+    ]
+
+    cif_header_found = False
+    cif_text_start = -1
+
+    for pattern in cif_patterns:
+        match = re.search(pattern, cif_section, re.IGNORECASE)
+        if match:
+            cif_header_found = True
+            cif_text_start = match.start()
+            break
+
+    # If no CIF section found, default to active on assent
+    if not cif_header_found:
+        return (
+            CIFStatus.ACTIVE_ON_ASSENT.name,
+            "No Coming into Force section found - defaults to Royal Assent",
+        )
+
+    # Extract text after CIF header (next 500 chars)
+    cif_details = cif_section[cif_text_start : cif_text_start + 500]
+
+    # Check for Order in Council pattern
+    order_patterns = [
+        r"Order in Council",
+        r"order of the Governor in Council",
+        r"by order of the Governor",
+        r"fixed by order",
+    ]
+
+    for pattern in order_patterns:
+        if re.search(pattern, cif_details, re.IGNORECASE):
+            return (CIFStatus.WAITING_FOR_ORDER.name, cif_details.strip())
+
+    # Check for specific date/year mentions
+    date_patterns = [
+        r"\d{4}",  # Year
+        r"(January|February|March|April|May|June|July|August|September|October|November|December)",
+        r"\d{1,2}\s+(January|February|March|April|May|June|July|August|September|October|November|December)",
+        r"on a day to be fixed",
+    ]
+
+    for pattern in date_patterns:
+        if re.search(pattern, cif_details, re.IGNORECASE):
+            # If mentions "to be fixed" it's likely Order in Council
+            if re.search(r"to be fixed", cif_details, re.IGNORECASE):
+                return (CIFStatus.WAITING_FOR_ORDER.name, cif_details.strip())
+            return (CIFStatus.FIXED_DATE.name, cif_details.strip())
+
+    # Check for "on assent" or "on sanction"
+    assent_patterns = [
+        r"on (?:the day on which|royal) assent",
+        r"on sanction",
+        r"(?:on|upon) (?:its )?(?:receiving|receipt of) (?:royal )?assent",
+    ]
+
+    for pattern in assent_patterns:
+        if re.search(pattern, cif_details, re.IGNORECASE):
+            return (CIFStatus.ACTIVE_ON_ASSENT.name, cif_details.strip())
+
+    # Default to active on assent if section exists but unclear
+    return (CIFStatus.ACTIVE_ON_ASSENT.name, cif_details.strip())
+
+
+def process_passed_bill(bill: Bill, bill_text: str = "", metadata: Dict = None) -> bool:
+    """
+    Process a bill that has received Royal Assent.
+
+    Extracts chapter citation and analyzes Coming into Force status.
+    Only runs once when bill transitions to ROYAL_ASSENT stage.
+
+    NOTE: This function is available for future use when bill text becomes accessible
+    via API. Currently not called automatically but infrastructure is ready.
+
+    Args:
+        bill: Bill object that received Royal Assent
+        bill_text: Full text of the bill/statute (if available)
+        metadata: Bill metadata dictionary
+
+    Returns:
+        True if processing was performed, False if already processed
+    """
+    # Only process if not already done
+    if bill.chapter_citation or bill.cif_status != CIFStatus.NOT_DETERMINED.name:
+        return False
+
+    metadata = metadata or {}
+
+    # Extract chapter citation
+    chapter = extract_chapter_citation(bill_text, metadata)
+    if chapter:
+        bill.chapter_citation = chapter
+        logger.info(f"📜 Bill {bill.bill_id} chapter citation: {chapter}")
+    else:
+        logger.warning(f"⚠️  Could not extract chapter citation for {bill.bill_id}")
+
+    # Analyze Coming into Force
+    cif_status, cif_details = analyze_coming_into_force(bill_text)
+    bill.cif_status = cif_status
+    bill.cif_details = cif_details
+
+    # Log CIF status
+    status_emoji = {
+        CIFStatus.ACTIVE_ON_ASSENT.name: "✅",
+        CIFStatus.FIXED_DATE.name: "📅",
+        CIFStatus.WAITING_FOR_ORDER.name: "⏳",
+    }
+    emoji = status_emoji.get(cif_status, "❓")
+    logger.info(f"{emoji} Bill {bill.bill_id} CIF status: {cif_status}")
+
+    return True
 
 
 class BillTracker:
@@ -411,13 +624,83 @@ class BillTracker:
         STORAGE_DIR.mkdir(exist_ok=True)
         logger.info(f"Storage directory verified: {STORAGE_DIR.absolute()}")
 
+    def _detect_current_parliament(self, bill_data_list: List[Dict]) -> int:
+        """Detect the current parliament number from bill data.
+
+        Returns the highest parliament number found in the bills.
+
+        Args:
+            bill_data_list: List of bill data dictionaries with 'session' field
+
+        Returns:
+            Highest parliament number found
+        """
+        parliament_numbers = []
+        for bill_data in bill_data_list:
+            session = bill_data.get("session", "")
+            if session and "-" in session:
+                try:
+                    parliament_num = int(session.split("-")[0])
+                    parliament_numbers.append(parliament_num)
+                except (ValueError, IndexError):
+                    continue
+
+        if parliament_numbers:
+            current = max(parliament_numbers)
+            return current
+
+        # Fallback to 44 if no bills found (shouldn't happen)
+        return 44
+
+    def _update_current_parliament(self, new_parliament: int) -> None:
+        """Update the global CURRENT_PARLIAMENT if a newer parliament is detected."""
+        global CURRENT_PARLIAMENT
+
+        if CURRENT_PARLIAMENT is None:
+            CURRENT_PARLIAMENT = new_parliament
+            logger.info(f"🏛️  Detected current parliament: {CURRENT_PARLIAMENT}")
+        elif new_parliament > CURRENT_PARLIAMENT:
+            old = CURRENT_PARLIAMENT
+            CURRENT_PARLIAMENT = new_parliament
+            logger.info(
+                f"🏛️  Parliament changed: {old} → {CURRENT_PARLIAMENT} "
+                f"(new parliament session detected!)"
+            )
+
     def _load_database(self) -> None:
-        """Load existing bills and their history from disk."""
+        """Load existing bills and their history from disk.
+
+        First fetches current bills to detect parliament number, then loads
+        historical data if needed.
+        """
+        # Step 1: Always fetch current bills first to detect parliament number
+        logger.info("Fetching current bills to detect parliament...")
+        current_bills_data = self._fetch_current_bills_xml()
+
+        if current_bills_data:
+            detected_parliament = self._detect_current_parliament(current_bills_data)
+            self._update_current_parliament(detected_parliament)
+        else:
+            logger.warning(
+                "Could not fetch current bills. Will use default parliament."
+            )
+
+        # Step 2: Load existing database
         if not DB_FILE.exists():
             logger.info("No existing database found. Starting fresh.")
+
+            # Process the current bills we just fetched
+            if current_bills_data:
+                logger.info(f"Processing {len(current_bills_data)} current bills...")
+                self._process_bill_data_batch(current_bills_data)
+
+            # Then fetch historical if requested
             if self.fetch_historical:
                 logger.info("Will perform initial historical bill fetch...")
                 self._fetch_historical_bills()
+
+            # Save everything
+            self._save_database()
             return
 
         try:
@@ -431,6 +714,14 @@ class BillTracker:
             bills_loaded = len(self.bills)
             logger.info(f"Loaded {bills_loaded} bills from database.")
 
+            # Process current bills to update any changes
+            if current_bills_data:
+                logger.info(f"Updating {len(current_bills_data)} current bills...")
+                changes = self._process_bill_data_batch(current_bills_data)
+                if changes > 0:
+                    logger.info(f"Detected {changes} changes in current bills.")
+                    self._save_database()
+
             # If database exists but is empty/very small, offer to fetch historical
             if bills_loaded < 10 and self.fetch_historical:
                 logger.info(
@@ -438,8 +729,66 @@ class BillTracker:
                     "Fetching historical bills to populate database..."
                 )
                 self._fetch_historical_bills()
+                self._save_database()
         except Exception as e:
             logger.error(f"Failed to load database: {e}")
+
+    def _fetch_current_bills_xml(self) -> List[Dict]:
+        """Fetch and parse current bills from the main API endpoint.
+
+        Returns:
+            List of parsed bill data dictionaries
+        """
+        try:
+            response = requests.get(LEGIS_URL, timeout=30)
+            response.raise_for_status()
+
+            root = ET.fromstring(response.content)
+            ns = {"ns": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
+
+            bill_data_list = []
+            for bill_elem in root.iter():
+                if "Bill" in bill_elem.tag:
+                    try:
+                        bill_data = self._parse_bill_element(bill_elem, ns)
+                        if bill_data:
+                            bill_data_list.append(bill_data)
+                    except Exception as e:
+                        logger.debug(f"Failed to parse bill element: {e}")
+
+            return bill_data_list
+
+        except requests.RequestException as e:
+            logger.error(f"Network error fetching current bills: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Error parsing current bills XML: {e}")
+            return []
+
+    def _process_bill_data_batch(self, bill_data_list: List[Dict]) -> int:
+        """Process a batch of bill data and return number of changes detected.
+
+        Args:
+            bill_data_list: List of bill data dictionaries
+
+        Returns:
+            Number of bills that had changes
+        """
+        changes = 0
+        for bill_data in bill_data_list:
+            try:
+                # Only process bills from current parliament
+                session = bill_data["session"]
+                parliament_num = int(session.split("-")[0])
+
+                if CURRENT_PARLIAMENT and parliament_num == CURRENT_PARLIAMENT:
+                    changed = self._process_bill(bill_data, suppress_new_log=False)
+                    if changed:
+                        changes += 1
+            except Exception as e:
+                logger.warning(f"Failed to process bill: {e}")
+
+        return changes
 
     def _save_database(self) -> None:
         """Save all bills and their history to disk."""
@@ -538,44 +887,45 @@ class BillTracker:
         preserved but not actively polled.
         """
         try:
-            logger.info(
-                f"Fetching current parliament {CURRENT_PARLIAMENT} bills from LEGISinfo API..."
-            )
-            response = requests.get(LEGIS_URL, timeout=30)
-            response.raise_for_status()
+            logger.info("Fetching current bills from LEGISinfo API...")
 
-            root = ET.fromstring(response.content)
+            # Fetch and parse current bills
+            all_bill_data = self._fetch_current_bills_xml()
 
-            # Handle XML namespaces if present
-            ns = {"ns": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
+            if not all_bill_data:
+                logger.warning("No bills fetched from API.")
+                return
 
+            # Auto-detect current parliament from the bills we found
+            detected_parliament = self._detect_current_parliament(all_bill_data)
+            self._update_current_parliament(detected_parliament)
+
+            # Now process bills from current parliament
+            logger.info(f"Processing bills from parliament {CURRENT_PARLIAMENT}...")
             bills_processed = 0
             changes_detected = 0
             current_parliament_bills = set()
 
-            # Parse bills from XML
-            for bill_elem in root.iter():
-                if "Bill" in bill_elem.tag:
-                    try:
-                        bill_data = self._parse_bill_element(bill_elem, ns)
-                        if bill_data:
-                            # Only process bills from current parliament
-                            session = bill_data["session"]
-                            parliament_num = int(session.split("-")[0])
+            # Process the bills
+            for bill_data in all_bill_data:
+                try:
+                    # Only process bills from current parliament
+                    session = bill_data["session"]
+                    parliament_num = int(session.split("-")[0])
 
-                            if parliament_num == CURRENT_PARLIAMENT:
-                                unique_key = f"{session}-{bill_data['bill_id']}"
-                                current_parliament_bills.add(unique_key)
-                                changed = self._process_bill(bill_data)
-                                bills_processed += 1
-                                if changed:
-                                    changes_detected += 1
-                            else:
-                                logger.debug(
-                                    f"Skipping historical bill {bill_data['bill_id']} from parliament {parliament_num}"
-                                )
-                    except Exception as e:
-                        logger.warning(f"Failed to parse bill element: {e}")
+                    if parliament_num == CURRENT_PARLIAMENT:
+                        unique_key = f"{session}-{bill_data['bill_id']}"
+                        current_parliament_bills.add(unique_key)
+                        changed = self._process_bill(bill_data)
+                        bills_processed += 1
+                        if changed:
+                            changes_detected += 1
+                    else:
+                        logger.debug(
+                            f"Skipping historical bill {bill_data['bill_id']} from parliament {parliament_num}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to process bill: {e}")
 
             # Mark bills from previous parliaments as inactive if they didn't receive royal assent
             self._update_bill_lifecycle_status(current_parliament_bills)

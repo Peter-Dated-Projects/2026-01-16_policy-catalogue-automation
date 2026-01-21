@@ -29,7 +29,21 @@ def show_royal_assent_summary(bills: list):
         print("-" * 80)
         for bill in received_assent[:10]:  # Show first 10
             days = calculate_days_since(bill["royal_assent_date"])
-            print(f"  {bill['bill_id']:8} | {bill['title'][:50]:50} | {days} days ago")
+            chapter = bill.get("chapter_citation", "Chapter TBD")
+            cif = bill.get("cif_status", "Not Determined")
+            cif_emoji = {
+                "ACTIVE_ON_ASSENT": "✅",
+                "FIXED_DATE": "📅",
+                "WAITING_FOR_ORDER": "⏳",
+            }.get(
+                cif.replace("Active on Royal Assent", "ACTIVE_ON_ASSENT")
+                .replace("Fixed Date", "FIXED_DATE")
+                .replace("Waiting for Order in Council", "WAITING_FOR_ORDER"),
+                "❓",
+            )
+            print(
+                f"  {bill['bill_id']:8} | {chapter:20} | {cif_emoji} {cif:25} | {days} days ago"
+            )
 
 
 def show_activity_summary(bills: list):
@@ -152,6 +166,26 @@ def show_detailed_bill_info(bills: list, bill_id: str = None):
     if bill.get("royal_assent_date"):
         days_since_assent = calculate_days_since(bill["royal_assent_date"])
         print(f"Royal Assent:         Received ({days_since_assent} days ago)")
+
+        # Show chapter citation if available
+        if bill.get("chapter_citation"):
+            print(f"Chapter Citation:     {bill['chapter_citation']}")
+
+        # Show Coming into Force status
+        cif_status = bill.get("cif_status", "Not Determined")
+        cif_emoji = {
+            "ACTIVE_ON_ASSENT": "✅",
+            "Active on Royal Assent": "✅",
+            "FIXED_DATE": "📅",
+            "Fixed Date": "📅",
+            "WAITING_FOR_ORDER": "⏳",
+            "Waiting for Order in Council": "⏳",
+        }.get(cif_status, "❓")
+        print(f"Coming into Force:    {cif_emoji} {cif_status}")
+
+        if bill.get("cif_details"):
+            details = bill["cif_details"][:100]
+            print(f"CIF Details:          {details}...")
     else:
         print(f"Royal Assent:         Not yet received")
 

@@ -58,6 +58,26 @@ def display_bill(bill: dict):
         days = calculate_days_since(bill["royal_assent_date"])
         print(f"   Royal Assent:  ✓ Received ({days} days ago)")
         print(f"   Status:        🎉 BECAME LAW")
+
+        # Show chapter citation
+        if bill.get("chapter_citation"):
+            print(f"   Chapter:       {bill['chapter_citation']}")
+
+        # Show Coming into Force status
+        cif_status = bill.get("cif_status", "Not Determined")
+        cif_emoji = {
+            "ACTIVE_ON_ASSENT": "✅",
+            "Active on Royal Assent": "✅",
+            "FIXED_DATE": "📅",
+            "Fixed Date": "📅",
+            "WAITING_FOR_ORDER": "⏳",
+            "Waiting for Order in Council": "⏳",
+        }.get(cif_status, "❓")
+        print(f"   In Force:      {cif_emoji} {cif_status}")
+
+        if bill.get("cif_details"):
+            details = bill["cif_details"][:80]
+            print(f"   CIF Details:   {details}...")
     else:
         print(f"   Royal Assent:  ⏳ Pending")
 
