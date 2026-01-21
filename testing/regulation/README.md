@@ -1,102 +1,47 @@
 # Canadian Federal Regulation Tracker
 
-A robust Python system for tracking the lifecycle of Canadian Federal Regulations from the Canada Gazette RSS feeds.
+A Python system for monitoring Canadian Federal Regulations from the Canada Gazette RSS feeds. Tracks both proposed and enacted regulations with automated polling.
 
 ## Overview
 
-The Canada Gazette is the official newspaper of the Canadian government where regulations are published:
-- **Part I**: Proposed regulations (Consultation phase)
-- **Part II**: Enacted regulations (Official Laws)
+The Canada Gazette publishes regulations in two parts:
+- **Part I**: Proposed regulations (consultation phase)
+- **Part II**: Enacted regulations (official law)
 
-This tracker monitors both feeds, extracts metadata, and maintains a persistent history of all regulations.
+This tracker monitors both RSS feeds, extracts structured metadata, and maintains a persistent database of regulations.
 
-## Features
+## Core Functionality
 
-✅ **Automated Data Collection**
-- Fetches regulations from both Part I (proposed) and Part II (enacted) RSS feeds
-- Polls every 24 hours to catch new publications
+### Data Collection
+- Fetches from Part I and Part II RSS feeds
+- Polls every 24 hours for new publications
+- Extracts regulation IDs (SOR/YYYY-NNN, SI/YYYY-NNN)
+- Identifies sponsor departments
+- Parses enabling acts
+- Normalizes publication dates to ISO 8601 format
 
-✅ **Smart Metadata Extraction**
-- Regulation IDs (SOR/YYYY-NNN or SI/YYYY-NNN)
-- Sponsor departments/entities
-- Enabling Acts
-- Publication dates in ISO 8601 format
-- Direct links to full text
-
-✅ **Persistent Storage**
-- Saves data to `assets/data.json`
+### Data Management
+- Stores data in JSON format at `assets/data.json`
 - Merges new data with existing records
-- Automatic deduplication
-- Never loses history
+- Automatic deduplication by regulation ID
+- Preserves historical entries
 
-✅ **Robust Error Handling**
-- Comprehensive logging
-- Graceful handling of malformed feeds
-- Continues operation even if individual entries fail
+## File Structure
 
-## Installation
-
-### Prerequisites
-- Python 3.7+
-- Virtual environment (recommended)
-
-### Install Dependencies
-
-```bash
-# Install required packages
-pip install feedparser schedule
-
-# Or if using the workspace's virtual environment:
-source /path/to/.venv/bin/activate
-pip install feedparser schedule
+```
+testing/regulation/
+├── main.py           # Regulation tracking daemon
+└── assets/
+    └── data.json     # Persistent regulation database
 ```
 
 ## Usage
 
-### Run Once (Single Scan)
+### Run the Tracker
 
 ```bash
-cd /path/to/testing/regulation
-python main.py
-```
-
-By default, the script runs in scheduled mode (continuous polling every 24 hours). To run a single scan and exit, modify the `main()` function:
-
-```python
-def main():
-    tracker = RegulationTracker(data_file="assets/data.json")
-    tracker.run_once()  # Run once and exit
-```
-
-### Run Continuously (Scheduled Mode)
-
-```bash
-python main.py
-```
-
-This will:
-1. Run an initial scan immediately
-2. Schedule scans every 24 hours
-3. Continue running until interrupted (Ctrl+C)
-
-### Programmatic Usage
-
-```python
-from main import RegulationTracker
-
-# Initialize tracker
-tracker = RegulationTracker(data_file="assets/data.json")
-
-# Run a single scan
-tracker.scan_gazette()
-
-# Access regulations
-for reg in tracker.regulations:
-    print(f"{reg.regulation_name} - Stage: {reg.stage}")
-    if reg.regulation_id:
-        print(f"  ID: {reg.regulation_id}")
-    if reg.sponsor:
-        print(f"  Sponsor: {reg.sponsor}")
+# Run continuously (polls every 24 hours)
+python testing/regulation/main.py
 ```
 
 ## Data Structure

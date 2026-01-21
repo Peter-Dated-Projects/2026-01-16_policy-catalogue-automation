@@ -1,103 +1,71 @@
-# 🏛️ Canadian Legislative Bill Tracker
+# Canadian Legislative Bill Tracker
 
-A production-ready Python daemon that continuously monitors Canadian Parliament bills via the LEGISinfo API, detecting and logging all status changes with complete historical tracking.
+A Python system for monitoring Canadian Parliament bills via the LEGISinfo API. Tracks bill status changes, maintains historical data, and provides analytics tools.
 
-## ✨ Features
+## Overview
 
-- **Persistent Daemon**: Runs continuously, polling every 4 hours
-- **Historical Tracking**: Automatically fetches all bills from Parliaments 35-44 (1994-present) on first run
-- **Change Detection**: Only alerts when bill status actually changes
-- **Complete History**: Maintains immutable audit trail of all status transitions
-- **Crash Recovery**: Loads previous state on restart—no duplicate alerts
-- **Error Resilient**: Handles network failures gracefully, retries automatically
-- **Type-Safe**: Fully type-hinted with modern Python best practices
-- **Flexible Configuration**: Command-line options to control historical fetching
+This system consists of three main components:
+- **Bill Tracker** (`main.py`): Daemon that polls the LEGISinfo API and maintains a persistent database of all bills
+- **Bill Lookup** (`bill_lookup.py`): Query tool for viewing detailed information about specific bills
+- **Bill Analytics** (`bill_analytics.py`): Analysis tool for aggregating statistics across bills
 
-## 🏗️ Architecture
+The tracker monitors bills from Parliament 35 (1994) onwards and stores data in a JSON database at `assets/data.json`.
 
-### Core Classes
+## Core Functionality
 
-#### `BillState` (Frozen Dataclass)
-Immutable snapshot of a bill at a specific moment:
-```python
-@dataclass(frozen=True)
-class BillState:
-    status_code: str
-    status_text: str
-    timestamp: str
-    chamber: str
-    text_url: str
-```
+### Tracking System
+- Polls LEGISinfo API every 4 hours for status changes
+- Maintains complete history of bill status transitions
+- Classifies bills by type (Government, Private Member's, Senate)
+- Tracks lifecycle stages (First Reading → Royal Assent)
+- Detects Royal Assent and Coming-into-Force status
+- Flags bills that died on Order Paper
 
-#### `Bill` (Class)
-Represents a single piece of legislation:
-```python
-class Bill:
-    session: str          # e.g., "44-1"
-    bill_id: str          # e.g., "C-11"
-    title: str
-    history: List[BillState]
-    
-    def update(...) -> bool:  # Returns True if changed
-    def to_dict() -> Dict:    # JSON serialization
-```
+### Analytics & Queries
+- Look up individual bills by ID (e.g., `C-11`, `S-2`)
+- View sponsor analysis and political weight
+- Track activity timelines and stale bills
+- Analyze Royal Assent patterns and chapter citations
+- Generate summaries by stage, chamber, and status
 
-#### `BillTracker` (Daemon Manager)
-Orchestrates polling, persistence, and change detection:
-- Loads/saves from `legislation/bills_db.json`
-- Fetches XML from LEGISinfo API
-- Detects changes and logs alerts
-
-## 📁 File Structure
+## File Structure
 
 ```
 testing/legislative/
-├── main.py              # Complete tracking system
-├── README.md            # This file
-└── ../../legislation/   # Storage directory (auto-created)
-    └── bills_db.json    # Persistent state database
+├── main.py              # Bill tracking daemon
+├── bill_lookup.py       # Query tool for individual bills
+├── bill_analytics.py    # Aggregate analytics
+├── utils.py             # Shared utility functions
+└── assets/
+    └── data.json        # Persistent bill database
 ```
 
-## 🚀 Usage
+## Usage
 
-### Running the Daemon
+### Start the Tracker
 
 ```bash
-# Start tracking (runs forever until Ctrl+C)
-# On first run, automatically fetches all historical bills (1-2 minutes)
+# Run with automatic historical fetch (first time)
 python testing/legislative/main.py
 
-# Or with UV
-uv run testing/legislative/main.py
-
-# Skip historical fetch (faster startup, current bills only)
+# Skip historical fetch (faster startup)
 python testing/legislative/main.py --no-historical
 
-# Force re-fetch all historical bills (even if database exists)
+# Force re-fetch all historical data
 python testing/legislative/main.py --force-historical
 ```
 
-### Expected Output
+The daemon will run continuously until interrupted (Ctrl+C).
 
-**First Run (with historical fetch):**
-```
-2026-01-19 00:29:56 - INFO - No existing database found. Starting fresh.
-2026-01-19 00:29:56 - INFO - Will perform initial historical bill fetch...
-2026-01-19 00:29:56 - INFO - ============================================================
-2026-01-19 00:29:56 - INFO - HISTORICAL BILL FETCH - This may take several minutes...
-2026-01-19 00:29:56 - INFO - ============================================================
-2026-01-19 00:29:56 - INFO - Fetching Parliament 35-1...
-2026-01-19 00:29:57 - INFO -   → Added 300 bills from 35-1
-2026-01-19 00:29:58 - INFO - Fetching Parliament 35-2...
-2026-01-19 00:29:59 - INFO -   → Added 358 bills from 35-2
-...
-2026-01-19 00:31:20 - INFO - Historical fetch complete: 6,234 bills added
-2026-01-19 00:31:20 - INFO - ============================================================
-```
+### Query Bills
 
-**Subsequent Runs (daemon mode):**
-```
-2026-01-18 19:52:19 - INFO - Loaded 6,234 bills from database.
+```bash
+# Look up specific bills
+python testing/legislative/bill_lookup.py C-11
+python testing/legislative/bill_lookup.py S-2 C-234
+
+# View analytics
+python testing/legislative/bill_analytics.py
 2026-01-18 19:52:19 - INFO - ============================================================
 2026-01-18 19:52:19 - INFO - Canadian Legislative Bill Tracker - STARTED
 2026-01-18 19:52:19 - INFO - Poll interval: 4 hours
