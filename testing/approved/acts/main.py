@@ -85,18 +85,15 @@ def main():
 
         # Show initial statistics
         stats = laws.get_statistics()
-        logger.info(f"Library initialized with {stats['laws']['total']} laws")
-        logger.info(f"  Acts: {stats['laws']['acts']}")
-        logger.info(f"  Regulations: {stats['laws']['regulations']}")
+        logger.info(f"Library initialized with {stats['files']['total']} law files")
+        logger.info(f"  Acts: {stats['files']['acts']}")
+        logger.info(f"  Regulations: {stats['files']['regulations']}")
 
         # Start background sync daemon
         daemon = LawLibraryDaemon(laws)
         daemon.start()
 
         logger.info("Storage system is running. Press Ctrl+C to stop.")
-
-        # test search
-        print(laws.search("Access to Information"))
 
         # Keep the main thread alive while daemon runs
         while True:

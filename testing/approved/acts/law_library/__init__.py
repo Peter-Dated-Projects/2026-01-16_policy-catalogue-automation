@@ -1,14 +1,12 @@
 """
-Canadian Law Library - Local mirror and search system for Government of Canada laws.
+Canadian Law Library - Local mirror system for Government of Canada laws.
 
-This package provides a complete system for:
+This package provides:
 - Syncing with the official Department of Justice Git repository
-- Indexing Acts and Regulations in a SQLite database
-- High-level search and retrieval API
+- Access to local Acts and Regulations XML files
 """
 
 from .api import CanadianLaws
 from .repo_manager import LawRepoManager
-from .indexer import LawIndexer
 
-__all__ = ["CanadianLaws", "LawRepoManager", "LawIndexer"]
+__all__ = ["CanadianLaws", "LawRepoManager"]
