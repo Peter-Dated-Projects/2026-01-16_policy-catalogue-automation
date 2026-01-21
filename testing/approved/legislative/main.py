@@ -24,7 +24,7 @@ LEGIS_URL = "https://www.parl.ca/legisinfo/en/bills/xml"
 # Historical sessions to track (going back to 35th Parliament, 1994)
 # Format: Parliament-Session (e.g., "44-1" = 44th Parliament, 1st Session)
 HISTORICAL_PARLIAMENTS = list(range(35, 45))  # Parliaments 35 through 44
-STORAGE_DIR = Path("legislation")
+STORAGE_DIR = Path("assets")
 DB_FILE = STORAGE_DIR / "bills_db.json"
 
 # Logging setup

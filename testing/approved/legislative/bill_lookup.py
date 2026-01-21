@@ -6,45 +6,7 @@ Usage: python bill_lookup.py C-11
 """
 
 import sys
-import json
-from pathlib import Path
-from datetime import datetime
-
-
-def load_bills() -> dict:
-    """Load bills from the database."""
-    db_file = Path("legislation/bills_db.json")
-
-    if not db_file.exists():
-        print("❌ No database found. Run main.py first to fetch bills.")
-        return {}
-
-    with open(db_file, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    # Create a lookup dictionary by bill_id
-    bills_dict = {}
-    for bill in data.get("bills", []):
-        bills_dict[bill["bill_id"]] = bill
-
-    return bills_dict
-
-
-def calculate_days_since(date_str: str) -> int:
-    """Calculate days since a given date."""
-    if not date_str:
-        return None
-    try:
-        if "T" in date_str:
-            date_part = date_str.split("T")[0]
-            last_date = datetime.fromisoformat(date_part)
-        else:
-            last_date = datetime.fromisoformat(date_str)
-
-        days = (datetime.now() - last_date).days
-        return days
-    except:
-        return None
+from utils import load_bills, calculate_days_since
 
 
 def display_bill(bill: dict):
@@ -129,9 +91,12 @@ def main():
         print("\nTo see all bills, use: python bill_analytics.py")
         return
 
-    bills_dict = load_bills()
-    if not bills_dict:
+    bills = load_bills()
+    if not bills:
         return
+
+    # Create a lookup dictionary by bill_id
+    bills_dict = {bill["bill_id"]: bill for bill in bills}
 
     bill_ids = sys.argv[1:]
 
