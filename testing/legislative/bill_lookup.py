@@ -22,6 +22,16 @@ def display_bill(bill: dict):
     print(f"   Session:       {bill['session']}")
     print(f"   Type:          {bill.get('bill_type', 'Unknown')}")
 
+    # Lifecycle status
+    if bill.get("died_on_order_paper"):
+        print(f"   Status:        ⚰️  DIED ON ORDER PAPER (session ended)")
+    elif bill.get("royal_assent_date"):
+        print(f"   Status:        ✅ BECAME LAW")
+    elif bill.get("is_active", True):
+        print(f"   Status:        🔄 ACTIVE (in current parliament)")
+    else:
+        print(f"   Status:        📋 HISTORICAL")
+
     # Sponsor info
     if bill.get("sponsor"):
         print(f"\n👤 Sponsorship:")

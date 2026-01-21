@@ -15,10 +15,14 @@ def show_royal_assent_summary(bills: list):
     print("=" * 80)
 
     received_assent = [b for b in bills if b.get("royal_assent_date")]
-    pending_assent = [b for b in bills if not b.get("royal_assent_date")]
+    pending_assent = [
+        b for b in bills if not b.get("royal_assent_date") and b.get("is_active", True)
+    ]
+    died_bills = [b for b in bills if b.get("died_on_order_paper", False)]
 
     print(f"Bills with Royal Assent: {len(received_assent)}")
-    print(f"Bills without Royal Assent: {len(pending_assent)}")
+    print(f"Bills without Royal Assent (Active): {len(pending_assent)}")
+    print(f"Bills Died on Order Paper: {len(died_bills)}")
 
     if received_assent:
         print("\nBills that received Royal Assent:")
@@ -133,6 +137,17 @@ def show_detailed_bill_info(bills: list, bill_id: str = None):
         f"Royal Recommendation: {'Yes' if bill.get('has_royal_recommendation') else 'No'}"
     )
 
+    # Lifecycle status
+    if bill.get("died_on_order_paper"):
+        print(f"Status:               ⚰️  DIED ON ORDER PAPER (session ended)")
+    elif bill.get("royal_assent_date"):
+        days_since_assent = calculate_days_since(bill["royal_assent_date"])
+        print(f"Status:               ✅ BECAME LAW ({days_since_assent} days ago)")
+    elif bill.get("is_active", True):
+        print(f"Status:               🔄 ACTIVE (in current parliament)")
+    else:
+        print(f"Status:               📋 HISTORICAL (from past parliament)")
+
     # Royal assent
     if bill.get("royal_assent_date"):
         days_since_assent = calculate_days_since(bill["royal_assent_date"])
@@ -155,6 +170,35 @@ def show_detailed_bill_info(bills: list, bill_id: str = None):
         )
 
 
+def show_bill_lifecycle_summary(bills: list):
+    """Show summary of bill lifecycle status."""
+    print("\n" + "=" * 80)
+    print("BILL LIFECYCLE STATUS")
+    print("=" * 80)
+
+    active_bills = [
+        b for b in bills if b.get("is_active", True) and not b.get("royal_assent_date")
+    ]
+    became_law = [b for b in bills if b.get("royal_assent_date")]
+    died_bills = [b for b in bills if b.get("died_on_order_paper", False)]
+    historical = [
+        b
+        for b in bills
+        if not b.get("is_active", True) and not b.get("died_on_order_paper", False)
+    ]
+
+    print(f"\n🔄 Active Bills (current parliament): {len(active_bills)}")
+    print(f"✅ Bills That Became Law:          {len(became_law)}")
+    print(f"⚰️  Died on Order Paper:            {len(died_bills)}")
+    print(f"📋 Historical (other status):       {len(historical)}")
+
+    if died_bills:
+        print("\n⚰️  Bills That Died on Order Paper (Parliament/Session Ended):")
+        print("-" * 80)
+        for bill in died_bills[:10]:
+            print(f"  {bill['bill_id']:8} | {bill['session']:6} | {bill['title'][:50]}")
+
+
 def main():
     """Generate comprehensive bill analytics."""
     bills = load_bills()
@@ -169,6 +213,7 @@ def main():
     print(f"Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     # Show different analyses
+    show_bill_lifecycle_summary(bills)
     show_activity_summary(bills)
     show_sponsor_analysis(bills)
     show_royal_recommendation_analysis(bills)

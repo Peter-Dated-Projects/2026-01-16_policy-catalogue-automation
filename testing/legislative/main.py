@@ -21,6 +21,8 @@ import requests
 # Configuration
 POLL_INTERVAL_HOURS = 4
 LEGIS_URL = "https://www.parl.ca/legisinfo/en/bills/xml"
+# Current parliament to actively monitor (bills in older sessions are historical only)
+CURRENT_PARLIAMENT = 44  # Update this when a new parliament begins
 # Historical sessions to track (going back to 35th Parliament, 1994)
 # Format: Parliament-Session (e.g., "44-1" = 44th Parliament, 1st Session)
 HISTORICAL_PARLIAMENTS = list(range(35, 45))  # Parliaments 35 through 44
@@ -83,6 +85,8 @@ class Bill:
         has_royal_recommendation: bool = False,
         current_stage: Optional[str] = None,
         publication_count: int = 0,
+        is_active: bool = True,
+        died_on_order_paper: bool = False,
     ):
         self.session = session
         self.bill_id = bill_id
@@ -98,6 +102,11 @@ class Bill:
         # Stage tracking
         self.current_stage = current_stage or BillStage.FIRST_READING.name
         self.publication_count = publication_count
+        # Lifecycle tracking
+        self.is_active = is_active  # False if from old parliament and didn't pass
+        self.died_on_order_paper = (
+            died_on_order_paper  # True if bill died when session ended
+        )
 
     @staticmethod
     def classify_bill_type(bill_id: str, title: str) -> str:
@@ -173,6 +182,19 @@ class Bill:
     def is_royal_assent_received(self) -> bool:
         """Check if bill has received royal assent."""
         return bool(self.royal_assent_date)
+
+    @property
+    def parliament_number(self) -> int:
+        """Extract parliament number from session (e.g., '44-1' -> 44)."""
+        try:
+            return int(self.session.split("-")[0])
+        except:
+            return 0
+
+    @property
+    def is_from_current_parliament(self) -> bool:
+        """Check if bill is from the current parliament."""
+        return self.parliament_number == CURRENT_PARLIAMENT
 
     def determine_stage_transition(
         self, status_text: str, chamber: str, new_publication_count: int = 0
@@ -346,6 +368,8 @@ class Bill:
             "has_royal_recommendation": self.has_royal_recommendation,
             "current_stage": self.current_stage,
             "publication_count": self.publication_count,
+            "is_active": self.is_active,
+            "died_on_order_paper": self.died_on_order_paper,
             "history": [state.to_dict() for state in self.history],
         }
 
@@ -366,6 +390,10 @@ class Bill:
             has_royal_recommendation=data.get("has_royal_recommendation", False),
             current_stage=data.get("current_stage"),
             publication_count=data.get("publication_count", 0),
+            is_active=data.get(
+                "is_active", True
+            ),  # Backward compatible - default to True
+            died_on_order_paper=data.get("died_on_order_paper", False),
         )
 
 
@@ -504,9 +532,15 @@ class BillTracker:
         self._save_database()
 
     def fetch_and_process_bills(self) -> None:
-        """Fetch bills from LEGISinfo API and process changes."""
+        """Fetch bills from LEGISinfo API and process changes.
+
+        Only monitors bills from the current parliament. Historical bills are
+        preserved but not actively polled.
+        """
         try:
-            logger.info("Fetching current bills from LEGISinfo API...")
+            logger.info(
+                f"Fetching current parliament {CURRENT_PARLIAMENT} bills from LEGISinfo API..."
+            )
             response = requests.get(LEGIS_URL, timeout=30)
             response.raise_for_status()
 
@@ -517,6 +551,7 @@ class BillTracker:
 
             bills_processed = 0
             changes_detected = 0
+            current_parliament_bills = set()
 
             # Parse bills from XML
             for bill_elem in root.iter():
@@ -524,15 +559,29 @@ class BillTracker:
                     try:
                         bill_data = self._parse_bill_element(bill_elem, ns)
                         if bill_data:
-                            changed = self._process_bill(bill_data)
-                            bills_processed += 1
-                            if changed:
-                                changes_detected += 1
+                            # Only process bills from current parliament
+                            session = bill_data["session"]
+                            parliament_num = int(session.split("-")[0])
+
+                            if parliament_num == CURRENT_PARLIAMENT:
+                                unique_key = f"{session}-{bill_data['bill_id']}"
+                                current_parliament_bills.add(unique_key)
+                                changed = self._process_bill(bill_data)
+                                bills_processed += 1
+                                if changed:
+                                    changes_detected += 1
+                            else:
+                                logger.debug(
+                                    f"Skipping historical bill {bill_data['bill_id']} from parliament {parliament_num}"
+                                )
                     except Exception as e:
                         logger.warning(f"Failed to parse bill element: {e}")
 
+            # Mark bills from previous parliaments as inactive if they didn't receive royal assent
+            self._update_bill_lifecycle_status(current_parliament_bills)
+
             logger.info(
-                f"Processed {bills_processed} bills. "
+                f"Processed {bills_processed} active bills. "
                 f"Changes detected: {changes_detected}"
             )
 
@@ -543,6 +592,35 @@ class BillTracker:
             logger.error(f"Network error while fetching bills: {e}")
         except Exception as e:
             logger.error(f"Unexpected error during fetch: {e}")
+
+    def _update_bill_lifecycle_status(self, current_parliament_bills: set) -> None:
+        """Mark bills from old parliaments as inactive if they died on the order paper.
+
+        Canadian parliamentary rule: Bills that don't receive Royal Assent before
+        a parliament/session ends die on the order paper and must be reintroduced
+        as new bills in the next session.
+        """
+        for unique_key, bill in self.bills.items():
+            # Skip if bill already marked as inactive
+            if not bill.is_active:
+                continue
+
+            # If bill received royal assent, it's permanently law (never dies)
+            if bill.is_royal_assent_received:
+                continue
+
+            # If bill is from an old parliament and not in current API feed
+            if (
+                not bill.is_from_current_parliament
+                and unique_key not in current_parliament_bills
+            ):
+                if bill.is_active:  # Only log once when marking inactive
+                    logger.info(
+                        f"⚰️  Bill {bill.bill_id} ({bill.session}) died on order paper "
+                        f"(parliament ended without Royal Assent)"
+                    )
+                    bill.is_active = False
+                    bill.died_on_order_paper = True
 
     def _parse_bill_element(self, elem: ET.Element, ns: Dict) -> Optional[Dict]:
         """Extract bill data from XML element."""
