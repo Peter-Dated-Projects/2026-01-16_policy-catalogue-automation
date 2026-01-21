@@ -21,12 +21,12 @@ We'll also include stuff for testing/generating reports and newsletter emails.
 ## Testing Projects
 
 ### Legislative Bill Tracker
-[View Documentation](testing/approved/legislative/README.md)
+[View Documentation](testing/approved/bills/README.md)
 
 A Python system that monitors Canadian Parliament bills via the LEGISinfo API. Tracks bill status changes from Parliament 35 (1994) onwards, maintains historical data with complete status transition history, and provides analytics tools for viewing bill details, sponsor analysis, and Royal Assent patterns. Polls the API every 4 hours to detect changes across all lifecycle stages.
 
 ### Federal Regulation Tracker
-[View Documentation](testing/approved/regulation/README.md)
+[View Documentation](testing/approved/regulations/README.md)
 
 A Python system that monitors Canadian Federal Regulations from the Canada Gazette RSS feeds. Tracks both proposed regulations (Part I) and enacted regulations (Part II), extracting structured metadata including regulation IDs, sponsor departments, enabling acts, and publication dates. Polls feeds every 24 hours and maintains a persistent JSON database of all regulations.
 
