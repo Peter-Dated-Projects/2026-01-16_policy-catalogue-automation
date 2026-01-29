@@ -9,6 +9,8 @@ import os
 import json
 import time
 import requests
+import threading
+import concurrent.futures
 from datetime import datetime
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
@@ -25,6 +27,7 @@ from part3 import parse_part3_table
 SLEEP_INTERVAL = 4 * 60 * 60  # 4 hours in seconds
 ASSETS_DIR = "assets"
 START_YEAR = 1998  # Check back to this year
+MAX_WORKERS = 5  # Max threads for concurrent scraping
 VALID_TYPES = [
     "Commissions",
     "Government Notices",
@@ -373,7 +376,9 @@ def save_data(part_num: int, data_dict: dict):
         traceback.print_exc()
 
 
-def process_year_for_part(year: int, part: int, status: dict) -> dict:
+def process_year_for_part(
+    year: int, part: int, status: dict, status_lock: threading.Lock = None
+) -> dict:
     """
     Process a specific year for a specific part.
     Scrapes all issues from that year and returns the data indexed by publication date.
@@ -382,26 +387,42 @@ def process_year_for_part(year: int, part: int, status: dict) -> dict:
         year: The year to process
         part: The part number (1, 2, or 3)
         status: The current status dict
+        status_lock: Optional lock for thread-safe status updates
 
     Returns:
         Dictionary with publication dates as keys and scraped data as values
     """
     part_key = f"part{part}"
 
+    # Helper context manager for optional locking
+    class OptionalLock:
+        def __init__(self, lock):
+            self.lock = lock
+
+        def __enter__(self):
+            if self.lock:
+                self.lock.acquire()
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            if self.lock:
+                self.lock.release()
+
     # Check if we've already processed this year
-    if str(year) in status["years_checked"][part_key]:
-        year_status = status["years_checked"][part_key][str(year)]
-        if year_status == "checked":
-            print(f"Part {part}, Year {year}: Already checked, skipping")
-            return {}
-        elif year_status == "empty":
-            print(f"Part {part}, Year {year}: Previously marked as empty, skipping")
-            return {}
+    with OptionalLock(status_lock):
+        if str(year) in status["years_checked"][part_key]:
+            year_status = status["years_checked"][part_key][str(year)]
+            if year_status == "checked":
+                print(f"Part {part}, Year {year}: Already checked, skipping")
+                return {}
+            elif year_status == "empty":
+                print(f"Part {part}, Year {year}: Previously marked as empty, skipping")
+                return {}
 
     # Check if the year exists
     if not check_year_exists(year, part):
         print(f"Part {part}, Year {year}: Does not exist, marking as empty")
-        status["years_checked"][part_key][str(year)] = "empty"
+        with OptionalLock(status_lock):
+            status["years_checked"][part_key][str(year)] = "empty"
         return {}
 
     print(f"Part {part}, Year {year}: Processing...")
@@ -411,7 +432,8 @@ def process_year_for_part(year: int, part: int, status: dict) -> dict:
 
     if not issue_urls:
         print(f"Part {part}, Year {year}: No issues found, marking as empty")
-        status["years_checked"][part_key][str(year)] = "empty"
+        with OptionalLock(status_lock):
+            status["years_checked"][part_key][str(year)] = "empty"
         return {}
 
     # Scrape each issue
@@ -437,11 +459,15 @@ def process_year_for_part(year: int, part: int, status: dict) -> dict:
             traceback.print_exc()
 
     # Mark year as checked
-    if year_data:
-        status["years_checked"][part_key][str(year)] = "checked"
-        print(f"Part {part}, Year {year}: Successfully scraped {len(year_data)} issues")
-    else:
-        status["years_checked"][part_key][str(year)] = "empty"
+    with OptionalLock(status_lock):
+        if year_data:
+            status["years_checked"][part_key][str(year)] = "checked"
+            print(
+                f"Part {part}, Year {year}: Successfully scraped {len(year_data)} issues"
+            )
+        else:
+            status["years_checked"][part_key][str(year)] = "empty"
+            status["years_checked"][part_key][str(year)] = "empty"
         print(f"Part {part}, Year {year}: No data found, marking as empty")
 
     return year_data
@@ -489,6 +515,7 @@ def run_scraping_cycle():
 
     # Load existing status and data
     status = load_status()
+    status_lock = threading.Lock()
 
     # Process each part
     for part in [1, 2, 3]:
@@ -500,18 +527,28 @@ def run_scraping_cycle():
         existing_data = load_existing_data(part)
         print(f"Loaded {len(existing_data)} existing publication dates for Part {part}")
 
-        # Process each year from START_YEAR to current_year
-        for year in range(START_YEAR, current_year + 1):
-            try:
-                year_data = process_year_for_part(year, part, status)
+        # Process each year from START_YEAR to current_year using ThreadPoolExecutor
+        future_to_year = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            for year in range(START_YEAR, current_year + 1):
+                future = executor.submit(
+                    process_year_for_part, year, part, status, status_lock
+                )
+                future_to_year[future] = year
 
-                # Merge new data into existing data
-                if year_data:
-                    existing_data.update(year_data)
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_year):
+                year = future_to_year[future]
+                try:
+                    year_data = future.result()
 
-            except Exception as e:
-                print(f"Error processing Part {part}, Year {year}: {e}")
-                traceback.print_exc()
+                    # Merge new data into existing data (thread-safe in main thread)
+                    if year_data:
+                        existing_data.update(year_data)
+
+                except Exception as e:
+                    print(f"Error processing Part {part}, Year {year}: {e}")
+                    traceback.print_exc()
 
         # Save updated data for this part
         save_data(part, existing_data)
