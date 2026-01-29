@@ -2,6 +2,7 @@
 Main orchestrator script for Canada Gazette scraping.
 Runs on a 4-hour interval, dynamically discovers latest issue URLs,
 scrapes data, and manages file storage with state tracking.
+Checks all years back to 1998 and indexes data by publication date.
 """
 
 import os
@@ -12,6 +13,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import traceback
+import re
 
 # Import the parsing functions from the scraper modules
 from part1 import parse_p1_publication, parse_section
@@ -22,6 +24,7 @@ from part3 import parse_part3_table
 # Configuration
 SLEEP_INTERVAL = 4 * 60 * 60  # 4 hours in seconds
 ASSETS_DIR = "assets"
+START_YEAR = 1998  # Check back to this year
 VALID_TYPES = [
     "Commissions",
     "Government Notices",
@@ -44,16 +47,109 @@ def ensure_assets_directory():
         print(f"Created directory: {ASSETS_DIR}")
 
 
-def get_latest_issue_url(year: int, part: int) -> str:
+def load_status():
     """
-    Discover the latest issue URL for a given part by scraping the yearly index page.
+    Load the db_status.json file.
+
+    Returns:
+        Dictionary containing status info, or a new empty status structure
+    """
+    status_file = os.path.join(ASSETS_DIR, "db_status.json")
+
+    if os.path.exists(status_file):
+        try:
+            with open(status_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading status file: {e}")
+
+    # Return default structure
+    return {
+        "time_of_last_check": None,
+        "latest_data_date": None,
+        "years_checked": {
+            "part1": {},  # year: "checked" or "empty"
+            "part2": {},
+            "part3": {},
+        },
+        "entry_counts": {"part1": 0, "part2": 0, "part3": 0},
+    }
+
+
+def save_status(status_data: dict):
+    """
+    Save the status data to db_status.json.
+
+    Args:
+        status_data: Dictionary containing status information
+    """
+    status_file = os.path.join(ASSETS_DIR, "db_status.json")
+
+    try:
+        with open(status_file, "w", encoding="utf-8") as f:
+            json.dump(status_data, f, ensure_ascii=False, indent=2)
+        print(f"Updated status file: {status_file}")
+    except Exception as e:
+        print(f"Error saving status file: {e}")
+        traceback.print_exc()
+
+
+def load_existing_data(part_num: int) -> dict:
+    """
+    Load existing data from part[n]_data.json if it exists.
+
+    Args:
+        part_num: The part number (1, 2, or 3)
+
+    Returns:
+        Dictionary containing existing data indexed by publication date
+    """
+    filename = os.path.join(ASSETS_DIR, f"part{part_num}_data.json")
+
+    if os.path.exists(filename):
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading existing Part {part_num} data: {e}")
+
+    # Return empty dict to store date-indexed data
+    return {}
+
+
+def check_year_exists(year: int, part: int) -> bool:
+    """
+    Check if a year's index page exists for the given part.
 
     Args:
         year: The year to check
         part: The part number (1, 2, or 3)
 
     Returns:
-        The URL of the most recent issue, or None if not found
+        True if the year exists, False otherwise
+    """
+    index_url = f"https://gazette.gc.ca/rp-pr/p{part}/{year}/index-eng.html"
+
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36"
+        }
+        response = requests.get(index_url, headers=headers, timeout=30)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+def get_all_issue_urls(year: int, part: int) -> list:
+    """
+    Get all issue URLs for a given year and part by scraping the yearly index page.
+
+    Args:
+        year: The year to check
+        part: The part number (1, 2, or 3)
+
+    Returns:
+        List of tuples (url, publication_date) for all issues in that year
     """
     index_url = f"https://gazette.gc.ca/rp-pr/p{part}/{year}/index-eng.html"
 
@@ -67,31 +163,31 @@ def get_latest_issue_url(year: int, part: int) -> str:
         soup = BeautifulSoup(response.content, "html.parser")
 
         if part == 3:
-            # Part 3 uses the index URL directly
-            return index_url
+            # Part 3 uses the index URL directly - just one entry per year
+            return [(index_url, f"{year}")]
 
-        # For Parts 1 and 2, find the most recent issue link
-        # Look for links that contain the pattern YYYY-MM-DD
-        issue_links = []
+        # For Parts 1 and 2, find all issue links with dates
+        issue_urls = []
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"]
-            # Check if href contains date pattern YYYY-MM-DD or similar
-            if f"{year}" in href and ("html" in href or "index" in href):
+            # Check if href contains date pattern YYYY-MM-DD
+            date_match = re.search(r"(\d{4}-\d{2}-\d{2})", href)
+            if date_match and f"{year}" in href and "html" in href:
                 full_url = urljoin(index_url, href)
-                issue_links.append(full_url)
+                pub_date = date_match.group(1)
+                # Avoid duplicates
+                if (full_url, pub_date) not in issue_urls:
+                    issue_urls.append((full_url, pub_date))
 
-        if issue_links:
-            # Return the first link (usually the most recent)
-            # You could enhance this to actually parse dates and find the latest
-            return issue_links[0]
+        if not issue_urls:
+            print(f"Warning: No issue links found for Part {part} in {year}")
 
-        print(f"Warning: No issue links found for Part {part} in {year}")
-        return None
+        return issue_urls
 
     except Exception as e:
-        print(f"Error fetching index for Part {part}: {e}")
+        print(f"Error fetching index for Part {part}, Year {year}: {e}")
         traceback.print_exc()
-        return None
+        return []
 
 
 def extract_publication_date_from_url(url: str) -> str:
@@ -105,11 +201,14 @@ def extract_publication_date_from_url(url: str) -> str:
         The publication date as a string (e.g., "2026-01-24")
     """
     # Try to extract from URL pattern first (e.g., /2026/2026-01-24/)
-    import re
-
     date_match = re.search(r"/(\d{4}-\d{2}-\d{2})/", url)
     if date_match:
         return date_match.group(1)
+
+    # Check for year-only pattern for Part 3
+    year_match = re.search(r"/p3/(\d{4})/", url)
+    if year_match:
+        return year_match.group(1)
 
     # Otherwise try to fetch and parse the page
     try:
@@ -154,9 +253,17 @@ def scrape_part1(url: str) -> dict:
     ):
         if url_key in PARSABLE_SECTIONS and url_key in parsed_sections:
             section_url = parsed_sections[url_key]
-            part1_data[section_name] = parse_section(
-                section_url, section_name, identifier_prefix
-            )
+
+            # Check if the URL is valid (not None or empty)
+            if section_url and isinstance(section_url, str):
+                try:
+                    part1_data[section_name] = parse_section(
+                        section_url, section_name, identifier_prefix
+                    )
+                except Exception as e:
+                    print(f"  Warning: Failed to parse section '{section_name}': {e}")
+            else:
+                print(f"  Warning: No valid URL for section '{section_name}', skipping")
 
     # Add Proposed Regulations if present
     if "Proposed Regulations" in parsed_sections:
@@ -193,9 +300,29 @@ def scrape_part3(url: str) -> list:
     return parse_part3_table(url)
 
 
+def count_all_entries(data_dict: dict, part_num: int) -> int:
+    """
+    Count total entries across all dates in the data structure.
+
+    Args:
+        data_dict: The full data dictionary indexed by date
+        part_num: The part number (1, 2, or 3)
+
+    Returns:
+        Total count of entries
+    """
+    total = 0
+    try:
+        for date_key, data in data_dict.items():
+            total += count_entries(data, part_num)
+    except Exception as e:
+        print(f"Error counting all entries for Part {part_num}: {e}")
+    return total
+
+
 def count_entries(data, part_num: int) -> int:
     """
-    Count the number of entries in the scraped data.
+    Count the number of entries in a single scraped data object.
 
     Args:
         data: The data structure (dict or list)
@@ -225,22 +352,99 @@ def count_entries(data, part_num: int) -> int:
         return 0
 
 
-def save_data(part_num: int, data):
+def save_data(part_num: int, data_dict: dict):
     """
     Save scraped data to JSON file in the assets directory.
+    Data is indexed by publication date.
 
     Args:
         part_num: The part number (1, 2, or 3)
-        data: The data to save
+        data_dict: Dictionary with publication dates as keys
     """
     filename = os.path.join(ASSETS_DIR, f"part{part_num}_data.json")
     try:
         with open(filename, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"Saved Part {part_num} data to {filename}")
+            json.dump(data_dict, f, ensure_ascii=False, indent=2)
+        print(
+            f"Saved Part {part_num} data to {filename} ({len(data_dict)} publication dates)"
+        )
     except Exception as e:
         print(f"Error saving Part {part_num} data: {e}")
         traceback.print_exc()
+
+
+def process_year_for_part(year: int, part: int, status: dict) -> dict:
+    """
+    Process a specific year for a specific part.
+    Scrapes all issues from that year and returns the data indexed by publication date.
+
+    Args:
+        year: The year to process
+        part: The part number (1, 2, or 3)
+        status: The current status dict
+
+    Returns:
+        Dictionary with publication dates as keys and scraped data as values
+    """
+    part_key = f"part{part}"
+
+    # Check if we've already processed this year
+    if str(year) in status["years_checked"][part_key]:
+        year_status = status["years_checked"][part_key][str(year)]
+        if year_status == "checked":
+            print(f"Part {part}, Year {year}: Already checked, skipping")
+            return {}
+        elif year_status == "empty":
+            print(f"Part {part}, Year {year}: Previously marked as empty, skipping")
+            return {}
+
+    # Check if the year exists
+    if not check_year_exists(year, part):
+        print(f"Part {part}, Year {year}: Does not exist, marking as empty")
+        status["years_checked"][part_key][str(year)] = "empty"
+        return {}
+
+    print(f"Part {part}, Year {year}: Processing...")
+
+    # Get all issue URLs for this year
+    issue_urls = get_all_issue_urls(year, part)
+
+    if not issue_urls:
+        print(f"Part {part}, Year {year}: No issues found, marking as empty")
+        status["years_checked"][part_key][str(year)] = "empty"
+        return {}
+
+    # Scrape each issue
+    year_data = {}
+    for url, pub_date in issue_urls:
+        try:
+            print(f"  Scraping {pub_date}: {url}")
+
+            if part == 1:
+                data = scrape_part1(url)
+            elif part == 2:
+                data = scrape_part2(url)
+            elif part == 3:
+                data = scrape_part3(url)
+            else:
+                continue
+
+            # Store with publication date as key
+            year_data[pub_date] = data
+
+        except Exception as e:
+            print(f"  Error scraping {url}: {e}")
+            traceback.print_exc()
+
+    # Mark year as checked
+    if year_data:
+        status["years_checked"][part_key][str(year)] = "checked"
+        print(f"Part {part}, Year {year}: Successfully scraped {len(year_data)} issues")
+    else:
+        status["years_checked"][part_key][str(year)] = "empty"
+        print(f"Part {part}, Year {year}: No data found, marking as empty")
+
+    return year_data
 
 
 def update_status_file(publication_date: str, entry_counts: dict):
@@ -271,10 +475,11 @@ def update_status_file(publication_date: str, entry_counts: dict):
 def run_scraping_cycle():
     """
     Execute one complete scraping cycle:
-    1. Discover latest URLs
-    2. Scrape all three parts
-    3. Save data
-    4. Update status file
+    1. Load existing status and data
+    2. Check all years from START_YEAR to current year
+    3. Scrape unchecked years for all three parts
+    4. Merge new data with existing data
+    5. Save updated data and status
     """
     print("\n" + "=" * 60)
     print(f"Starting scraping cycle at {datetime.now().isoformat()}")
@@ -282,63 +487,66 @@ def run_scraping_cycle():
 
     current_year = datetime.now().year
 
-    # Initialize tracking variables
-    part1_data = None
-    part2_data = None
-    part3_data = None
+    # Load existing status and data
+    status = load_status()
+
+    # Process each part
+    for part in [1, 2, 3]:
+        print(f"\n{'=' * 60}")
+        print(f"Processing Part {part}")
+        print(f"{'=' * 60}")
+
+        # Load existing data for this part
+        existing_data = load_existing_data(part)
+        print(f"Loaded {len(existing_data)} existing publication dates for Part {part}")
+
+        # Process each year from START_YEAR to current_year
+        for year in range(START_YEAR, current_year + 1):
+            try:
+                year_data = process_year_for_part(year, part, status)
+
+                # Merge new data into existing data
+                if year_data:
+                    existing_data.update(year_data)
+
+            except Exception as e:
+                print(f"Error processing Part {part}, Year {year}: {e}")
+                traceback.print_exc()
+
+        # Save updated data for this part
+        save_data(part, existing_data)
+
+        # Update total entry count
+        total_entries = count_all_entries(existing_data, part)
+        status["entry_counts"][f"part{part}"] = total_entries
+        print(f"Part {part}: Total entries = {total_entries}")
+
+    # Update status metadata
+    status["time_of_last_check"] = datetime.utcnow().isoformat() + "Z"
+
+    # Find the most recent publication date across all parts
     latest_date = "Unknown"
+    for part in [1, 2, 3]:
+        data = load_existing_data(part)
+        if data:
+            # Get the most recent date key
+            dates = sorted(data.keys(), reverse=True)
+            if dates:
+                latest_date = dates[0]
+                break
 
-    # Discover and scrape Part 1
-    try:
-        part1_url = get_latest_issue_url(current_year, 1)
-        if part1_url:
-            latest_date = extract_publication_date_from_url(part1_url)
-            part1_data = scrape_part1(part1_url)
-            save_data(1, part1_data)
-        else:
-            print("Warning: Could not find Part 1 URL")
-    except Exception as e:
-        print(f"Error processing Part 1: {e}")
-        traceback.print_exc()
+    status["latest_data_date"] = latest_date
 
-    # Discover and scrape Part 2
-    try:
-        part2_url = get_latest_issue_url(current_year, 2)
-        if part2_url:
-            part2_data = scrape_part2(part2_url)
-            save_data(2, part2_data)
-        else:
-            print("Warning: Could not find Part 2 URL")
-    except Exception as e:
-        print(f"Error processing Part 2: {e}")
-        traceback.print_exc()
-
-    # Discover and scrape Part 3
-    try:
-        part3_url = get_latest_issue_url(current_year, 3)
-        if part3_url:
-            part3_data = scrape_part3(part3_url)
-            save_data(3, part3_data)
-        else:
-            print("Warning: Could not find Part 3 URL")
-    except Exception as e:
-        print(f"Error processing Part 3: {e}")
-        traceback.print_exc()
-
-    # Count entries and update status
-    entry_counts = {
-        "part1": count_entries(part1_data, 1) if part1_data else 0,
-        "part2": count_entries(part2_data, 2) if part2_data else 0,
-        "part3": count_entries(part3_data, 3) if part3_data else 0,
-    }
-
-    update_status_file(latest_date, entry_counts)
+    # Save status
+    save_status(status)
 
     print("\n" + "=" * 60)
     print(f"Scraping cycle completed at {datetime.now().isoformat()}")
-    print(f"Publication date: {latest_date}")
+    print(f"Latest publication date: {latest_date}")
     print(
-        f"Entry counts: Part1={entry_counts['part1']}, Part2={entry_counts['part2']}, Part3={entry_counts['part3']}"
+        f"Entry counts: Part1={status['entry_counts']['part1']}, "
+        f"Part2={status['entry_counts']['part2']}, "
+        f"Part3={status['entry_counts']['part3']}"
     )
     print("=" * 60)
 
@@ -346,9 +554,12 @@ def run_scraping_cycle():
 def main():
     """
     Main loop: Run scraping cycles continuously with 4-hour intervals.
+    Each cycle checks all years from 1998 to present for all 3 parts,
+    but skips years that have already been checked.
     """
     print("Canada Gazette Scraper - Starting")
     print(f"Sleep interval: {SLEEP_INTERVAL / 3600} hours")
+    print(f"Checking years from {START_YEAR} to present")
 
     # Ensure assets directory exists
     ensure_assets_directory()
