@@ -12,4 +12,5 @@ dependencies = [
     "lxml>=5.1.0",
     "bs4>=0.0.2",
     "pypdf2>=3.0.1",
+    "pytest>=9.0.2",
 ]
