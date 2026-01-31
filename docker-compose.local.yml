@@ -1,0 +1,84 @@
+services:
+  # PostgreSQL Database
+  pca-psql:
+    image: postgres:15
+    container_name: pca-psql
+    ports:
+      - "${DB_PORT}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=${DB_NAME}
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - pca
+
+  # ArangoDB Database
+  pca-arangodb:
+    image: arangodb:3.12
+    container_name: pca-arangodb
+    ports:
+      - "${ARANGO_PORT}:8529"
+    volumes:
+      - arangodb-data:/var/lib/arangodb3
+    environment:
+      - ARANGO_ROOT_PASSWORD=${ARANGO_ROOT_PASSWORD}
+      - ARANGO_DATABASE=${ARANGO_DB_NAME}
+      - ARANGO_USER=${ARANGO_USER}
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "arangosh --server.endpoint tcp://127.0.0.1:8529 --server.username ${ARANGO_USER} --server.password $${ARANGO_ROOT_PASSWORD} --javascript.execute-string 'db._version();'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - pca
+
+  # MinIO for S3-compatible object storage
+  pca-minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z-cpuv1
+    container_name: pca-minio
+    ports:
+      - "${MINIO_PORT}:9000"
+      - "9001:9001" # MinIO Console
+    volumes:
+      - minio-data:/data
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - pca
+
+networks:
+  pca:
+    driver: bridge
+
+volumes:
+  postgres-data:
+    driver: local
+  arangodb-data:
+    driver: local
+  minio-data:
+    driver: local
